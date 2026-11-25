@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>Snowglow</AssemblyName>
+    <RootNamespace>Snowglow.Windows</RootNamespace>
+    <Version>0.2.0</Version>
+    <Product>Snowglow Windows</Product>
+    <ApplicationIcon>Assets/Snowglow.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Assets/Snowglow.ico" LogicalName="Snowglow.ico" />
+    <EmbeddedResource Include="../Resources/WinterCabin.jpg" LogicalName="WinterCabin.jpg" />
+    <EmbeddedResource Include="../Resources/Wallpapers/*.jpg" LogicalName="Wallpapers.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../Resources/SettingsIcons/*.png" LogicalName="Icons.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/Decorations/*.png" LogicalName="Decorations.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../LICENSE" LogicalName="Snowglow.LICENSE.txt" />
+  </ItemGroup>
+</Project>

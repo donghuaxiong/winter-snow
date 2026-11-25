@@ -1,8 +1,33 @@
 import CoreGraphics
 
+enum SnowmanGround {
+    static func followsSupport(_ ornament: Ornament, usableHeight: CGFloat) -> Bool {
+        if let follows = ornament.snowmanFollowsGround { return follows }
+        // Old saves only recorded coordinates. Recognize the original default and workshop positions.
+        let defaultPosition = (0..<5).contains { index in
+            let offset = Double(index) * 0.052
+            return abs(ornament.x - (0.77 - offset)) < 0.001 && abs(ornament.y - (0.29 + offset)) < 0.001
+        }
+        let oldGround = 13 + ornament.scale * (SnowmanArt.baseline - OrnamentKind.snowman.size.height / 2)
+        return defaultPosition || abs(ornament.y * usableHeight - oldGround) < 6
+    }
+
+    static func foot(at x: CGFloat, screen: CGRect, dock: CGRect?) -> CGFloat {
+        if let dock, dock.width > 16, (dock.minX + 8...dock.maxX - 8).contains(x) { return dock.maxY + 1 }
+        return screen.minY + 1
+    }
+
+    static func frame(center: CGPoint, size: CGSize, inside display: CGRect) -> CGRect {
+        let x = min(display.maxX - size.width / 2, max(display.minX + size.width / 2, center.x))
+        let belowCenter = size.height * (SnowmanArt.baseline / OrnamentKind.snowman.size.height - 0.5)
+        let y = min(display.maxY - size.height / 2, max(display.minY + belowCenter, center.y))
+        return CGRect(x: x - size.width / 2, y: y - size.height / 2, width: size.width, height: size.height)
+    }
+}
+
 struct SnowballPlatform {
     enum ID: Hashable {
-        case window(UInt32), ground(UInt32)
+        case window(UInt32), dock(UInt32), ground(UInt32)
     }
 
     let id: ID
@@ -59,19 +84,17 @@ struct SnowmanWorkshop {
     init(knocking snowman: Ornament, from frame: CGRect, direction: CGFloat, reduced: Bool) {
         tumbling = true
         age = 1
-        let tones = snowman.snowballs == 2 ? [0, 2] : [0, 1, 2]
         let velocities: [CGFloat] = [-103, 25, 158]
-        var center = p(frame.midX, frame.maxY - (SnowmanArt.baseline - SnowmanArt.radii[0]) * snowman.scale)
-        var previousRadius: CGFloat = 0
-        balls = tones.enumerated().map { id, tone in
-            let radius = SnowmanArt.radii[tone] * snowman.scale
-            if id > 0 { center.y += SnowmanArt.gap(previousRadius, radius) }
-            previousRadius = radius
-            let impulse = direction * velocities[tone] * (reduced ? 0.58 : 1)
-            return WorkshopBall(id: id, radius: radius, center: center,
-                                speed: id == 0 ? 48 : 84, horizontalSpeed: impulse)
+        let local = CGRect(origin: .zero, size: frame.size)
+        balls = SnowmanArt.parts(for: snowman, in: local).enumerated().map { id, part in
+            let center = p(frame.minX + part.center.x, frame.maxY - part.center.y)
+            let impulse = direction * velocities[part.tone] * (reduced ? 0.58 : 1)
+            return WorkshopBall(id: id, radius: part.radius, center: center,
+                                speed: id == 0 ? 48 : 84, horizontalSpeed: impulse, spin: part.angle)
         }
     }
+
+    func tone(for ball: WorkshopBall) -> Int { ball.id == balls.count - 1 ? 2 : ball.id }
 
     mutating func grab(_ id: Int, at point: CGPoint) {
         guard balls.indices.contains(id), revealed(id), held == nil else { return }

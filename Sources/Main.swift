@@ -11,6 +11,9 @@ enum Snowglow {
         if arguments.count == 3 && arguments[1] == "--write-icon" {
             exit(writeIcon(to: URL(fileURLWithPath: arguments[2])) ? 0 : 1)
         }
+        if arguments.count == 3 && arguments[1] == "--render-3d-preview" {
+            exit(write3DPreview(to: URL(fileURLWithPath: arguments[2])) ? 0 : 1)
+        }
         if arguments.contains("--self-test") {
             SelfTest.run()
             return
@@ -78,6 +81,45 @@ enum Snowglow {
         CGImageDestinationAddImage(destination, image, nil)
         return CGImageDestinationFinalize(destination)
     }
+
+    private static func write3DPreview(to url: URL) -> Bool {
+        let width = 1440
+        let height = 620
+        guard let image = WinterArtwork.bitmap(width: width, height: height, draw: { ink in
+            ink.gradient(CGRect(x: 0, y: 0, width: width, height: height), [0x0D1B2E, 0x152B46, 0x0B1524])
+            // Subtle simulated dark macOS window top bar & snow ledge across the bottom
+            let ledgeY: CGFloat = 500
+            ink.rounded(CGRect(x: 60, y: ledgeY, width: CGFloat(width - 120), height: 140), 18, 0x1E222A)
+            ink.line([p(78, ledgeY + 1), p(CGFloat(width - 78), ledgeY + 1)], 0x4A5B70, width: 1.5, alpha: 0.45)
+
+            var snowman1 = Ornament(kind: .snowman, display: 0, x: 0.5, y: 0.5)
+            snowman1.hat = .top
+            snowman1.snowballs = 3
+            snowman1.costume = SnowmanCostume(face: .smile, scarf: .red, arms: true, buttons: true)
+
+            var snowman2 = Ornament(kind: .snowman, display: 0, x: 0.5, y: 0.5)
+            snowman2.hat = .santa
+            snowman2.snowballs = 2
+            snowman2.costume = SnowmanCostume(face: .happy, scarf: .green, arms: true, buttons: true)
+
+            var gift = Ornament(kind: .gift, display: 0, x: 0.5, y: 0.5)
+            gift.palette = .classic
+
+            var tree = Ornament(kind: .tree, display: 0, x: 0.5, y: 0.5)
+            tree.palette = .classic
+            tree.extras = true
+
+            let now = Date()
+            DecorationArt.draw(snowman1, in: CGRect(x: 110, y: ledgeY - 310, width: 256, height: 330), with: ink, time: 0, now: now)
+            DecorationArt.draw(snowman2, in: CGRect(x: 410, y: ledgeY - 280, width: 234, height: 300), with: ink, time: 0, now: now)
+            DecorationArt.draw(gift, in: CGRect(x: 690, y: ledgeY - 205, width: 220, height: 215), with: ink, time: 0, now: now)
+            DecorationArt.draw(tree, in: CGRect(x: 960, y: ledgeY - 390, width: 340, height: 408), with: ink, time: 0, now: now)
+        }), let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+            return false
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        return CGImageDestinationFinalize(destination)
+    }
 }
 
 @MainActor
@@ -135,13 +177,16 @@ final class SnowAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         model.persist()
     }
 
-    @objc private func displaysChanged() { engine?.updateScreens() }
+    @objc private func displaysChanged() {
+        engine?.updateScreens()
+        if let wardrobe, wardrobe.isVisible { fitWardrobe(wardrobe) }
+    }
 
     @objc private func openStudio() { showStudio() }
 
     private func showStudio() {
         if studio == nil {
-            let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 960, height: 654),
+            let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 930, height: 700),
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                   backing: .buffered, defer: false)
             window.title = "Snowglow"
@@ -152,8 +197,7 @@ final class SnowAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
             window.tabbingMode = .disallowed
             window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
             window.minSize = CGSize(width: 865, height: 610)
-            window.backgroundColor = NSColor(rgb: 0x0c1726)
-            window.appearance = NSAppearance(named: .darkAqua)
+            window.backgroundColor = .windowBackgroundColor
             window.delegate = self
             window.contentView = NSHostingView(rootView: StudioView(model: model, page: .snowfall))
             window.center()
@@ -167,14 +211,12 @@ final class SnowAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
 
     private func showWardrobe(id: UUID, beside anchor: CGRect?) {
         guard model.settings.ornaments.contains(where: { $0.id == id && $0.kind == .snowman }) else { return }
-        let size = CGSize(width: 344, height: 456)
         if wardrobe == nil {
-            let panel = NSPanel(contentRect: CGRect(origin: .zero, size: size),
-                                styleMask: [.titled, .closable, .nonactivatingPanel, .fullSizeContentView],
+            let panel = NSPanel(contentRect: CGRect(origin: .zero, size: SnowmanWardrobe.preferredContentSize),
+                                styleMask: [.titled, .closable, .nonactivatingPanel],
                                 backing: .buffered, defer: false)
             panel.title = "雪人衣帽间"
             panel.titleVisibility = .hidden
-            panel.titlebarAppearsTransparent = true
             panel.standardWindowButton(.closeButton)?.isHidden = true
             panel.isMovableByWindowBackground = true
             panel.isReleasedWhenClosed = false
@@ -187,24 +229,26 @@ final class SnowAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         guard let panel = wardrobe else { return }
         let root = SnowmanWardrobe(model: model, id: id, close: { [weak panel] in panel?.orderOut(nil) },
                                   share: { [weak self] in self?.shareSnowman(id) })
-        panel.contentView = NSHostingView(rootView: root)
-        let mouse = NSEvent.mouseLocation
-        let reference = anchor ?? CGRect(x: mouse.x, y: mouse.y, width: 1, height: 1)
-        let center = p(reference.midX, reference.midY)
+        let hosting = NSHostingView(rootView: root)
+        hosting.sizingOptions = []
+        panel.contentView = hosting
+        fitWardrobe(panel, beside: anchor ?? CGRect(origin: NSEvent.mouseLocation, size: CGSize(width: 1, height: 1)))
+        panel.makeKeyAndOrderFront(nil)
+        addKeyMenu()
+    }
+
+    private func fitWardrobe(_ panel: NSPanel, beside anchor: CGRect? = nil) {
+        let reference = anchor ?? panel.frame
+        let center = CGPoint(x: reference.midX, y: reference.midY)
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? NSScreen.main {
-            let usable = screen.visibleFrame.insetBy(dx: 9, dy: 9)
-            let right = reference.maxX + 13
-            let left = reference.minX - size.width - 13
-            let x = right + size.width < usable.maxX ? right : left
-            let y = reference.maxY + 68 - size.height
-            let origin = p(max(usable.minX, min(usable.maxX - size.width, x)),
-                           max(usable.minY, min(usable.maxY - size.height, y)))
-            panel.setFrame(CGRect(origin: origin, size: size), display: false)
+            let contentRect = CGRect(origin: .zero, size: SnowmanWardrobe.preferredContentSize)
+            let frameSize = panel.frameRect(forContentRect: contentRect).size
+            let frame = SnowmanWardrobe.windowFrame(preferredSize: frameSize, beside: anchor,
+                                                   currentFrame: panel.frame, in: screen.visibleFrame)
+            panel.setFrame(frame, display: panel.isVisible)
         } else {
             panel.center()
         }
-        panel.makeKeyAndOrderFront(nil)
-        addKeyMenu()
     }
 
     private func shareSnowman(_ id: UUID) {
@@ -344,6 +388,10 @@ private enum SelfTest {
         checkCanvasDamage()
         checkPlowCycle(in: region, settings: settings)
         checkSnowmanWorkshop()
+        checkSnowmanGroundAndPlow()
+        checkSnowmanWardrobeFrame()
+        checkDecorationPlacement()
+        checkWreathRemoval()
 
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -370,20 +418,37 @@ private enum SelfTest {
         let decoded = try! JSONDecoder().decode(SnowStorage.self, from: state)
         precondition(decoded.settings == model.settings && decoded.scenes.count == 1)
         precondition(decoded.settings.automaticPlowing && decoded.scenes[0].settings.automaticPlowing)
+        precondition(!decoded.settings.plowDestroysDecorations && !decoded.scenes[0].settings.plowDestroysDecorations)
         model.settings.automaticPlowing = false
-        let disabled = try! JSONEncoder().encode(model.settings)
-        precondition(!(try! JSONDecoder().decode(SnowSettings.self, from: disabled)).automaticPlowing)
-        precondition(Wallpaper.all.count == 32 && Set(Wallpaper.all.map(\.id)).count == 32)
+        model.settings.plowDestroysDecorations = true
+        let enabledCollision = try! JSONEncoder().encode(model.settings)
+        let settingsWithCollision = try! JSONDecoder().decode(SnowSettings.self, from: enabledCollision)
+        precondition(!settingsWithCollision.automaticPlowing && settingsWithCollision.plowDestroysDecorations)
+        precondition(Wallpaper.winter.map(\.id) == Array(31...38))
+        precondition(Wallpaper.christmas.map(\.id) == Array(39...42))
+        precondition(Set(Wallpaper.all.map(\.id)).count == Wallpaper.all.count)
         if Bundle.main.bundlePath.hasSuffix(".app") {
-            precondition(Bundle.main.url(forResource: "WinterCabin", withExtension: "jpg") != nil)
+            for wallpaper in Wallpaper.all {
+                precondition(WinterArtwork.render(wallpaper, width: 192, height: 108) != nil)
+                precondition(WinterArtwork.render(wallpaper, width: 108, height: 192) != nil)
+            }
         }
-        for wallpaper in Wallpaper.all {
-            precondition(WinterArtwork.render(wallpaper, width: 192, height: 120) != nil)
-        }
+        var retired = SnowSettings()
+        retired.wallpaper = 8
+        var retained = SnowSettings()
+        retained.wallpaper = 31
+        var storage = SnowStorage(settings: retired, scenes: [
+            SavedScene(name: "Retired", settings: retired),
+            SavedScene(name: "Cabin", settings: retained),
+            SavedScene(name: "Original", settings: SnowSettings())
+        ])
+        storage.migrateRetiredWallpapers()
+        precondition(storage.settings.wallpaper == nil)
+        precondition(storage.scenes.map { $0.settings.wallpaper } == [31, 31, nil])
         let screens = NSScreen.screens
         let visible = DesktopWindow.onscreen(primaryTop: screens.first?.frame.maxY ?? 0,
                                            ignoring: ProcessInfo.processInfo.processIdentifier)
-        print("Passed: rounded window snow, drag and display handoff, falling window snow, cursor displacement and conserved floor deposition, Stage Manager geometry, Dock taper and landing, two plow passes with redeposition, snowball assembly and rebuilding, partial repaint, calendar, scene persistence, 32 wallpapers.")
+        print("Passed: rounded window snow, drag and display handoff, falling window snow, cursor displacement and conserved floor deposition, Stage Manager geometry, Dock taper and landing, two plow passes with redeposition, snowball assembly and rebuilding, wardrobe placement, decoration placement and plow contact, partial repaint, calendar, scene persistence, and \(Wallpaper.all.count) wallpapers with legacy selection migration.")
         print("Live WindowServer: \(screens.count) display(s), \(visible.count) eligible window(s).")
     }
 
@@ -648,6 +713,143 @@ private enum SelfTest {
         precondition(scene.drift(on: .floor) == nil)
         let encoded = try! JSONEncoder().encode(ornament)
         precondition((try! JSONDecoder().decode(Ornament.self, from: encoded)) == ornament)
+    }
+
+    private static func checkSnowmanWardrobeFrame() {
+        let preferred = CGSize(width: 344, height: 452)
+        let display = CGRect(x: -640, y: 982, width: 640, height: 700)
+        let bottomRight = CGRect(x: -100, y: 988, width: 86, height: 100)
+        let placed = SnowmanWardrobe.windowFrame(preferredSize: preferred, beside: bottomRight,
+                                                currentFrame: .zero, in: display)
+        precondition(placed.size == preferred && placed.minY == display.minY + 9)
+        precondition(placed.maxX == bottomRight.minX - 13 && display.contains(placed))
+
+        let compactDisplay = CGRect(x: 0, y: -300, width: 320, height: 300)
+        let fitted = SnowmanWardrobe.windowFrame(preferredSize: preferred, beside: nil,
+                                                currentFrame: placed, in: compactDisplay)
+        precondition(fitted == compactDisplay.insetBy(dx: 9, dy: 9))
+    }
+
+    private static func checkWreathRemoval() {
+        let tree = Ornament(kind: .tree, display: 2, x: 0.2, y: 0.5)
+        let wreath = Ornament(kind: .wreath, display: 2, x: 0.8, y: 0.5)
+        var legacy = SnowSettings()
+        legacy.ornaments = [wreath, tree]
+        let scene = SavedScene(name: "Legacy decorations", settings: legacy)
+        let oldData = try! JSONEncoder().encode(SnowStorage(settings: legacy, scenes: [scene]))
+        var decoded = try! JSONDecoder().decode(SnowStorage.self, from: oldData)
+        decoded.removeWreaths()
+        precondition(OrnamentKind.allCases.contains(.tree) && !OrnamentKind.allCases.contains(.wreath))
+        precondition(decoded.settings.ornaments == [tree] && decoded.scenes.first?.settings.ornaments == [tree])
+
+        let model = SnowModel(defaults: nil)
+        model.restoreScene(scene)
+        model.add(wreath)
+        precondition(model.settings.ornaments == [tree] && model.selectedOrnament == tree.id)
+    }
+
+    private static func checkSnowmanGroundAndPlow() {
+        let display = CGRect(x: 200, y: -80, width: 800, height: 700)
+        let dock = CGRect(x: 355, y: -72, width: 390, height: 62)
+        precondition(SnowmanGround.foot(at: 480, screen: display, dock: nil) == -79)
+        precondition(SnowmanGround.foot(at: 480, screen: display, dock: dock) == -9)
+        precondition(SnowmanGround.foot(at: 310, screen: display, dock: dock) == -79)
+
+        var snowman = Ornament(kind: .snowman, display: 1, x: 0.77, y: 0.29)
+        let oldSave = try! JSONEncoder().encode(snowman)
+        snowman = try! JSONDecoder().decode(Ornament.self, from: oldSave)
+        precondition(SnowmanGround.followsSupport(snowman, usableHeight: 680))
+        snowman.snowmanFollowsGround = false
+        let dragged = try! JSONEncoder().encode(snowman)
+        snowman = try! JSONDecoder().decode(Ornament.self, from: dragged)
+        precondition(!SnowmanGround.followsSupport(snowman, usableHeight: 680))
+        let size = OrnamentKind.snowman.size
+        let bottom = SnowmanGround.frame(center: p(display.minX, display.minY), size: size, inside: display)
+        precondition(bottom.minX == display.minX && bottom.maxY - SnowmanArt.baseline == display.minY)
+
+        snowman.hat = .santa
+        snowman.costume.scarf = .red
+        snowman.costume.arms = true
+        let floor = CGRect(x: 0, y: 700, width: 800, height: 1)
+        for (count, direction) in [(2, CGFloat(-1)), (3, CGFloat(1))] {
+            snowman.snowballs = count
+            var pass = PlowPass(direction: direction)
+            pass.advance(1.8, width: floor.width)
+            let first = SnowplowContact(pass: pass, previous: nil, floor: floor)
+            let pose = CGRect(x: first.blade + 17 * direction - size.width / 2,
+                              y: floor.minY - SnowmanArt.baseline, width: size.width, height: size.height)
+            let parts = SnowmanArt.parts(for: snowman, in: pose)
+            precondition(parts.count == count && parts.last?.tone == 2)
+            precondition(first.hits(parts[0]))
+            let high = SnowmanArt.parts(for: snowman, in: pose.offsetBy(dx: 0, dy: -70))
+            precondition(!high.contains(where: first.hits))
+            var next = pass
+            next.advance(0.5, width: floor.width)
+            precondition(!SnowplowContact(pass: next, previous: nil, floor: floor).hits(parts[0]))
+            precondition(SnowplowContact(pass: next, previous: pass, floor: floor).hits(parts[0]))
+
+            var knocked = SnowmanWorkshop(knocking: snowman, from: pose, direction: direction, reduced: false)
+            let head = knocked.balls[count - 1]
+            knocked.grab(head.id, at: head.center)
+            let moved = p(head.center.x + 20, head.center.y + 90)
+            knocked.drag(to: moved, platforms: [])
+            precondition(knocked.balls[head.id].center == moved && knocked.tone(for: head) == 2)
+
+            var wreck = PlowedSnowman(ornament: snowman, parts: parts, contact: first)
+            let delta: CGFloat = 1.0 / 60
+            var visible = true
+            for _ in 0..<300 where visible {
+                let previous = pass
+                pass.advance(delta, width: floor.width)
+                let contact = SnowplowContact(pass: pass, previous: previous, floor: floor)
+                visible = wreck.advance(delta, contact: contact, floor: floor, reduced: false)
+            }
+            precondition(!visible && wreck.ornament == snowman)
+            precondition(wreck.parts.allSatisfy { direction * ($0.center.x - first.blade) > 350 && $0.angle != 0 })
+        }
+    }
+
+    private static func checkDecorationPlacement() {
+        let display = CGRect(x: -900, y: 982, width: 900, height: 640)
+        let usable = display.insetBy(dx: 12, dy: 58)
+        let floor = CGRect(x: 0, y: display.height, width: display.width, height: 1)
+        var pass = PlowPass(direction: 1)
+        pass.advance((floor.midX + PlowPass.approach - SnowplowArt.bladeNoseOffset) / pass.speed(width: floor.width), width: floor.width)
+        let contact = SnowplowContact(pass: pass, previous: nil, floor: floor)
+        for kind in OrnamentKind.allCases {
+            var item = Ornament(kind: kind, display: 1, x: 0.5, y: 0.04)
+            item.scale = 1.6
+            if kind == .gift { item.rotation = 28 }
+            precondition(!item.usesFreePlacement && usable.contains(item.desktopFrame(in: display, usable: usable)))
+            item.anchor = WindowAnchor(id: 19, owner: "Test", pid: 19, x: 100, y: 100)
+            let preview = item.desktopFrame(center: p(display.midX, display.minY), inside: display, free: true)
+            item.placeOnDesktop(at: p(preview.midX, preview.midY), displayID: 9, display: display)
+            let reloaded = try! JSONDecoder().decode(Ornament.self, from: JSONEncoder().encode(item))
+            let settled = reloaded.desktopFrame(in: display, usable: usable)
+            precondition(reloaded.anchor == nil && reloaded.display == 9 && reloaded.usesFreePlacement)
+            precondition(abs(settled.minX - preview.minX) < 0.001 && abs(settled.minY - preview.minY) < 0.001)
+
+            let frame = CGRect(x: settled.minX - display.minX, y: display.maxY - settled.maxY,
+                               width: settled.width, height: settled.height)
+            if kind != .snowman {
+                let body = item.interactionFrame(in: frame)
+                precondition(contact.hits(body) && !contact.hits(body.offsetBy(dx: 0, dy: -64)))
+                var wreck = PlowedDecoration(ornament: item, frame: frame, contact: contact)
+                precondition(wreck.advance(0.2, floor: floor, reduced: false))
+                precondition(wreck.frame.midX > frame.midX && wreck.ornament.rotation > item.rotation)
+                precondition(!wreck.advance(0.75, floor: floor, reduced: false))
+            }
+        }
+
+        var lights = Ornament(kind: .lights, display: 9, x: 0.5, y: 0.5)
+        let window = CGRect(x: 240, y: 120, width: 420, height: floor.minY - 120)
+        let windowCenter = p(window.midX, window.midY)
+        let topLights = DecorationArt.windowLightHitRegions(lights, in: window)
+        precondition(topLights.contains { $0.contains(p(window.midX, window.minY + 22)) })
+        precondition(!topLights.contains { $0.contains(windowCenter) } && !topLights.contains(where: contact.hits))
+        lights.placement = .windowFrame
+        let frameLights = DecorationArt.windowLightHitRegions(lights, in: window)
+        precondition(!frameLights.contains { $0.contains(windowCenter) } && frameLights.contains(where: contact.hits))
     }
 
     private static func checkPlowCycle(in region: CGRect, settings: SnowSettings) {

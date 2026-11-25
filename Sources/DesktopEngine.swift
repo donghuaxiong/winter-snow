@@ -112,6 +112,19 @@ private final class HandleView: NSView {
     @objc private func knockDown() { knock?() }
 }
 
+private struct OrnamentHandleKey: Hashable {
+    let ornament: UUID
+    let display: UInt32
+    let region: Int
+}
+
+private struct OrnamentDragSession {
+    let handle: OrnamentHandleKey
+    let start: CGPoint
+    let center: CGPoint
+    var preview: (display: UInt32, frame: CGRect)?
+}
+
 @MainActor
 private final class ScreenOverlay {
     let id: UInt32
@@ -124,6 +137,8 @@ private final class ScreenOverlay {
     var sim: DisplayScene
     var placements: [(Ornament, CGRect, DesktopWindow?)] = []
     var fallingSnowmen: [FallingSnowman] = []
+    var plowedSnowmen: [PlowedSnowman] = []
+    var plowedDecorations: [PlowedDecoration] = []
     private var drawnSnow: [SurfaceID: (seed: UInt64, revision: UInt64)] = [:]
     var visibleBack = false
     var visibleFront = false
@@ -147,13 +162,14 @@ private final class ScreenOverlay {
         CGRect(x: frame.minX + rect.minX, y: frame.maxY - rect.maxY, width: rect.width, height: rect.height)
     }
 
-    func place(_ ornament: Ornament) -> CGRect {
-        let size = ornament.kind.size
-        let width = size.width * ornament.scale
-        let height = size.height * ornament.scale
-        let x = min(usable.maxX - width / 2, max(usable.minX + width / 2, usable.minX + usable.width * ornament.x))
-        let y = min(usable.maxY - height / 2, max(usable.minY + height / 2, usable.minY + usable.height * ornament.y))
-        return CGRect(x: x - width / 2, y: y - height / 2, width: width, height: height)
+    func place(_ ornament: Ornament, dock: CGRect?) -> CGRect {
+        let normal = ornament.desktopFrame(in: frame, usable: usable)
+        if ornament.kind == .snowman && SnowmanGround.followsSupport(ornament, usableHeight: usable.height) {
+            let foot = SnowmanGround.foot(at: normal.midX, screen: frame, dock: dock)
+            return CGRect(x: normal.minX, y: foot - (normal.height - SnowmanArt.baseline * ornament.scale),
+                          width: normal.width, height: normal.height)
+        }
+        return normal
     }
 
     func changedSnow(showing: Bool) -> [CGRect] {
@@ -260,14 +276,16 @@ final class DesktopEngine {
     private var snowmanPerches: [UUID: SnowmanPerch] = [:]
     private var capturedPreviewInput: Double?
     private var previewStarted: Double = 0
-    private var handles: [UUID: (OverlayPanel, HandleView)] = [:]
+    private var handles: [OrnamentHandleKey: (OverlayPanel, HandleView)] = [:]
     private var ballHandles: [Int: (OverlayPanel, HandleView)] = [:]
     private var workshop: SnowmanWorkshop?
     private var workshopDisplay: UInt32?
     private var workshopSource: UUID?
+    private var ballDragStart: (id: Int, point: CGPoint)?
     private var picking: [OverlayPanel] = []
-    private var dragSession: (id: UUID, start: CGPoint, center: CGPoint)?
-    private var workingPlacement = false
+    private var dragSession: OrnamentDragSession?
+    private var dragLayoutDirty = false
+    private var lastHandlesShowing = false
     private var wasRunning = false
     private var reducedMotion = false
     private var lastSettings: SnowSettings?
@@ -307,6 +325,7 @@ final class DesktopEngine {
         dockDisplays = external
         primaryTop = external.first?.frame.maxY ?? 0
         let ids = Set(external.map(\.snowScreenID))
+        let displaysChanged = ids != Set(screens.keys) || external.contains { screens[$0.snowScreenID]?.frame != $0.frame }
         for key in Array(screens.keys) where !ids.contains(key) {
             screens[key]?.setVisibility(back: false, front: false)
             screens.removeValue(forKey: key)
@@ -333,7 +352,10 @@ final class DesktopEngine {
         lastDockScan = 0
         layoutDirty = true
         if model.pickingWindow { finishPicking(nil) }
-        if model.buildingSnowman { cancelSnowman() }
+        if displaysChanged {
+            cancelOrnamentDrag()
+            if model.buildingSnowman { cancelSnowman() }
+        }
     }
 
     func clear() {
@@ -419,6 +441,7 @@ final class DesktopEngine {
         windowSnow.clear()
         layoutDirty = true
         lastScan = 0
+        cancelOrnamentDrag()
         cancelSnowman()
     }
 
@@ -451,6 +474,7 @@ final class DesktopEngine {
         workshop = nil
         workshopDisplay = nil
         workshopSource = nil
+        ballDragStart = nil
         layoutDirty = true
         model.buildingSnowman = false
         for (panel, _) in ballHandles.values { panel.orderOut(nil) }
@@ -474,7 +498,7 @@ final class DesktopEngine {
         workshop = SnowmanWorkshop(knocking: ornament, from: frame, direction: direction, reduced: reducedMotion)
         model.buildingSnowman = true
         snowmanPerches.removeValue(forKey: ornament.id)
-        handles.removeValue(forKey: ornament.id)?.0.orderOut(nil)
+        removeHandles(for: [ornament.id])
         layoutDirty = true
         updateBallHandles()
     }
@@ -499,7 +523,10 @@ final class DesktopEngine {
                         < abs(($1.span.lowerBound + $1.span.upperBound) / 2 - point.x)
                 }
         }
-        guard let platform = shelf ?? platforms.first(where: { $0.id == .ground(screen.id) }) else {
+        let dock = platforms.first {
+            $0.id == .dock(screen.id) && $0.span.contains(point.x) && $0.span.upperBound - $0.span.lowerBound >= 120
+        }
+        guard let platform = shelf ?? dock ?? platforms.first(where: { $0.id == .ground(screen.id) }) else {
             cancelSnowman(reopen: true)
             return
         }
@@ -513,10 +540,15 @@ final class DesktopEngine {
         var platforms: [SnowballPlatform] = []
         let ordinary = Dictionary(uniqueKeysWithValues: windows.filter { !$0.widget }.map { ($0.id, $0) })
         for screen in screens.values {
-            let ground = CGRect(x: screen.usable.minX + 10, y: screen.usable.minY + 12,
-                                width: max(1, screen.usable.width - 20), height: 1)
+            let ground = CGRect(x: screen.frame.minX + 10, y: screen.frame.minY,
+                                width: max(1, screen.frame.width - 20), height: 1)
             platforms.append(SnowballPlatform(id: .ground(screen.id), frame: ground,
                                                span: ground.minX...ground.maxX, anchor: nil))
+            if dockEdge == .bottom, let dock = dockFrames[screen.id], dock.width > 20 {
+                let shelf = dock.insetBy(dx: 8, dy: 0).offsetBy(dx: 0, dy: 1)
+                platforms.append(SnowballPlatform(id: .dock(screen.id), frame: shelf,
+                                                   span: shelf.minX...shelf.maxX, anchor: nil))
+            }
             for surface in screen.sim.surfaces {
                 guard case let .window(id) = surface.id, let window = ordinary[id] else { continue }
                 for range in surface.visible {
@@ -542,13 +574,21 @@ final class DesktopEngine {
                 panel = OverlayPanel(frame: frame, level: .init(rawValue: overlayLevel.rawValue + 1), interactive: true)
                 let view = HandleView()
                 let id = ball.id
-                let tone = id == workshop.balls.count - 1 ? 2 : id
+                let tone = workshop.tone(for: ball)
                 view.setAccessibilityLabel(["大雪球", "中雪球", "小雪球"][tone])
                 if workshopSource != nil {
-                    view.up = { [weak self] _ in
+                    view.down = { [weak self] point in self?.ballDragStart = (id, point) }
+                    view.drag = { [weak self] point in self?.dragLooseBall(id, to: point) }
+                    view.up = { [weak self] point in
                         guard let self else { return }
+                        self.dragLooseBall(id, to: point)
+                        self.ballDragStart = nil
                         let platforms = self.workshopPlatforms()
-                        self.workshop?.rebuild(at: id, on: platforms)
+                        if self.workshop?.held == id {
+                            self.workshop?.release(on: platforms)
+                        } else {
+                            self.workshop?.rebuild(at: id, on: platforms)
+                        }
                         self.finishWorkshopIfReady(platforms)
                     }
                 } else {
@@ -574,6 +614,13 @@ final class DesktopEngine {
         }
     }
 
+    private func dragLooseBall(_ id: Int, to point: CGPoint) {
+        guard let start = ballDragStart, start.id == id,
+              workshop?.held == id || hypot(point.x - start.point.x, point.y - start.point.y) > 3 else { return }
+        if workshop?.held == nil { workshop?.grab(id, at: start.point) }
+        workshop?.drag(to: point, platforms: workshopPlatforms())
+    }
+
     private func finishWorkshopIfReady(_ platforms: [SnowballPlatform]) {
         guard let workshop, let base = workshop.balls.first,
               let platform = workshop.completedPlatform(in: platforms),
@@ -595,11 +642,13 @@ final class DesktopEngine {
                 $0.y = y
                 $0.anchor = platform.anchor
                 $0.rotation = 0
+                $0.snowmanFollowsGround = true
             }
             return
         }
         var finished = Ornament(kind: .snowman, display: screen.id, x: x, y: y)
         finished.anchor = platform.anchor
+        finished.snowmanFollowsGround = true
         finished.scale = scale
         finished.hat = .none
         finished.costume = SnowmanCostume()
@@ -664,8 +713,15 @@ final class DesktopEngine {
         }
         let running = model.running
         let hasOrnaments = settings.ornamentsVisible && !settings.ornaments.isEmpty
+        let showingHandles = hasOrnaments && !model.preview && !model.pickingWindow
+        if let dragSession, !showingHandles || !settings.ornaments.contains(where: { $0.id == dragSession.handle.ornament }) {
+            cancelOrnamentDrag()
+        }
         let active = running || hasOrnaments || model.buildingSnowman
-            || screens.values.contains { !$0.fallingSnowmen.isEmpty || !$0.sim.released.isEmpty || $0.sim.fallingSnowAnimating }
+            || screens.values.contains {
+                !$0.fallingSnowmen.isEmpty || !$0.plowedSnowmen.isEmpty || !$0.plowedDecorations.isEmpty
+                    || !$0.sim.released.isEmpty || $0.sim.fallingSnowAnimating
+            }
         let studio = studioFrame?()
         let changed = settings != lastSettings || model.editMode != lastEditing || studio != lastStudioFrame || wasRunning != running
         lastSettings = settings
@@ -730,12 +786,18 @@ final class DesktopEngine {
         }
 
         let fullLayout = layoutDirty || changed
-        let needsLayout = fullLayout || geometryChanged || dockChanged
+        let draggedID = dragLayoutDirty ? dragSession?.handle.ornament : nil
+        let needsLayout = fullLayout || geometryChanged || dockChanged || dragLayoutDirty
+        dragLayoutDirty = false
         var layoutRegions: [UInt32: [CGRect]] = [:]
         if needsLayout {
+            let movedDecoration: ((Ornament, CGRect, DesktopWindow?)) -> Bool = { placement in
+                let (ornament, _, target) = placement
+                return target != nil || ornament.id == draggedID || (dockChanged && ornament.kind == .snowman)
+            }
             for screen in screens.values {
                 let oldSurfaces = fullLayout ? [] : screen.sim.surfaces
-                let oldAnchored = fullLayout ? [] : screen.placements.filter { $0.2 != nil }
+                let oldDecorations = fullLayout ? [] : screen.placements.filter(movedDecoration)
                 updateLayout(on: screen, studio: studio, hasOrnaments: hasOrnaments)
                 if !fullLayout {
                     let newSurfaces = screen.sim.surfaces
@@ -743,8 +805,9 @@ final class DesktopEngine {
                     let after = Dictionary(uniqueKeysWithValues: newSurfaces.map { ($0.id, $0) })
                     var regions = oldSurfaces.filter { after[$0.id] != $0 }.map(\.paintBounds)
                     regions += newSurfaces.filter { before[$0.id] != $0 }.map(\.paintBounds)
-                    if geometryChanged {
-                        for (ornament, rect, _) in oldAnchored + screen.placements.filter({ $0.2 != nil }) {
+                    if geometryChanged || draggedID != nil || dockChanged {
+                        let moved = oldDecorations + screen.placements.filter(movedDecoration)
+                        for (ornament, rect, _) in moved {
                             regions.append(ornament.paintBounds(in: rect))
                         }
                     }
@@ -785,6 +848,8 @@ final class DesktopEngine {
             screen.setVisibility(back: behind, front: active)
             let size = screen.frame.size
             let hasFallingSnowmen = !screen.fallingSnowmen.isEmpty
+            let plowWasPushing = !screen.plowedSnowmen.isEmpty || !screen.plowedDecorations.isEmpty
+            let previousPlow = screen.sim.plow
             let hasDebris = !screen.sim.released.isEmpty
             let hadFallingSnow = screen.sim.fallingSnowAnimating
             let swept = canSweep && screen.frame.contains(pointer) && screen.sim.sweepSnow(
@@ -797,6 +862,23 @@ final class DesktopEngine {
                 screen.sim.stepDebris(size: size, delta: delta, accumulate: false)
             }
             if hadFallingSnow && tracksSnow { screen.sim.stepFallingSnow(delta: delta, reduced: reducedMotion) }
+            var plowedRegions: [CGRect] = []
+            if let floor = screen.sim.surfaces.first(where: \.floor)?.rect {
+                let contact = screen.sim.plow.map { SnowplowContact(pass: $0, previous: previousPlow, floor: floor) }
+                if running, sceneTick, settings.plowDestroysDecorations, let contact {
+                    plowedRegions = collideDecorations(contact, floor: floor, on: screen)
+                }
+                for index in screen.plowedSnowmen.indices.reversed() {
+                    if !screen.plowedSnowmen[index].advance(delta, contact: contact, floor: floor, reduced: reducedMotion) {
+                        screen.plowedSnowmen.remove(at: index)
+                    }
+                }
+                for index in screen.plowedDecorations.indices.reversed() {
+                    if !screen.plowedDecorations[index].advance(delta, floor: floor, reduced: reducedMotion) {
+                        screen.plowedDecorations.remove(at: index)
+                    }
+                }
+            }
             for index in screen.fallingSnowmen.indices.reversed() {
                 if !screen.fallingSnowmen[index].advance(delta, scene: &screen.sim, limit: size.height,
                                                          accumulate: running && settings.accumulate, reduced: reducedMotion) {
@@ -807,18 +889,67 @@ final class DesktopEngine {
                 screen.backView.invalidate(moving: screen.sim.flakes.map(\.paintBounds), full: changed || revealBack || canvasChanged)
             }
             let fullFront = fullLayout || revealFront || canvasChanged
-            if active && (needsLayout || fullFront || sceneTick || hasDebris || hadFallingSnow || hasFallingSnowmen || workshop != nil || swept) {
+            if active && (needsLayout || fullFront || sceneTick || hasDebris || hadFallingSnow || hasFallingSnowmen
+                          || plowWasPushing || workshop != nil || swept) {
                 let moving = movingFront(on: screen, weatherInFront: running && !behind, idleScene: idleScene)
                 var changedRegions = screen.changedSnow(showing: running)
                 changedRegions += layoutRegions[screen.id] ?? []
                 changedRegions += changedFlakeMask.map(screen.local)
+                changedRegions += plowedRegions
                 screen.frontView.invalidate(moving: moving, changed: changedRegions, full: fullFront)
                 if dockChanged || (geometryChanged && (fastTracking || tracksSnow)) { screen.frontView.displayIfNeeded() }
             }
         }
-        if needsLayout || dragSession != nil {
-            updateHandles(studio, showing: hasOrnaments && !model.preview && !model.pickingWindow)
+        if needsLayout || showingHandles != lastHandlesShowing {
+            updateHandles(studio, showing: showingHandles)
+            lastHandlesShowing = showingHandles
         }
+    }
+
+    private func workshopPart(_ ball: WorkshopBall, in workshop: SnowmanWorkshop, on screen: ScreenOverlay) -> SnowmanPart {
+        SnowmanPart(tone: workshop.tone(for: ball), radius: ball.radius,
+                    center: screen.local(CGRect(origin: ball.center, size: .zero)).origin,
+                    angle: reducedMotion ? 0 : ball.spin)
+    }
+
+    private func collideDecorations(_ contact: SnowplowContact, floor: CGRect, on screen: ScreenOverlay) -> [CGRect] {
+        var destroyed = Set<UUID>()
+        var regions: [CGRect] = []
+        for (ornament, rect, target) in screen.placements where dragSession?.handle.ornament != ornament.id {
+            if ornament.kind == .snowman {
+                let parts = SnowmanArt.parts(for: ornament, in: rect)
+                guard let base = parts.first, contact.hits(base) else { continue }
+                screen.plowedSnowmen.append(PlowedSnowman(ornament: ornament, parts: parts, contact: contact))
+            } else {
+                let mountedLights = target != nil && ornament.kind == .lights
+                let body = mountedLights ? DecorationArt.windowLightHitRegions(ornament, in: rect)
+                                         : [ornament.interactionFrame(in: rect)]
+                guard body.contains(where: contact.hits) else { continue }
+                let size = ornament.drawnSize
+                let wreck = mountedLights ? CGRect(x: contact.blade - size.width / 2, y: floor.minY - size.height,
+                                                    width: size.width, height: size.height) : rect
+                screen.plowedDecorations.append(PlowedDecoration(ornament: ornament, frame: wreck, contact: contact))
+            }
+            destroyed.insert(ornament.id)
+            regions.append(ornament.paintBounds(in: rect))
+        }
+        if let workshop, workshop.held == nil,
+           let source = model.settings.ornaments.first(where: { $0.id == workshopSource }) {
+            let parts = workshop.balls.map { workshopPart($0, in: workshop, on: screen) }
+            if parts.contains(where: contact.hits) {
+                screen.plowedSnowmen.append(PlowedSnowman(ornament: source, parts: parts, contact: contact))
+                destroyed.insert(source.id)
+                regions += parts.map { $0.bounds(dressed: true) }
+                cancelSnowman()
+            }
+        }
+        guard !destroyed.isEmpty else { return regions }
+        model.remove(destroyed)
+        removeHandles(for: destroyed)
+        for id in destroyed { snowmanPerches.removeValue(forKey: id) }
+        for overlay in screens.values { overlay.placements.removeAll { destroyed.contains($0.0.id) } }
+        layoutDirty = true
+        return regions
     }
 
     private func movingFront(on screen: ScreenOverlay, weatherInFront: Bool, idleScene: Bool) -> [CGRect] {
@@ -850,9 +981,11 @@ final class DesktopEngine {
             rects.append(CGRect(around: grain.position, radius: grain.radius + 2))
         }
         for fall in screen.fallingSnowmen { rects.append(fall.ornament.paintBounds(in: fall.rect)) }
+        for wreck in screen.plowedSnowmen { rects += wreck.parts.map { $0.bounds(dressed: true) } }
+        for wreck in screen.plowedDecorations { rects.append(wreck.ornament.paintBounds(in: wreck.frame)) }
         if let workshop {
             for ball in workshop.balls where workshop.revealed(ball.id) {
-                rects.append(screen.local(CGRect(around: ball.center, radius: ball.radius + 3)))
+                rects.append(workshopPart(ball, in: workshop, on: screen).bounds(dressed: workshopSource != nil))
             }
             if screen.id == workshopDisplay { rects.append(workshopHint(in: screen.frontView.bounds)) }
         }
@@ -970,9 +1103,14 @@ final class DesktopEngine {
     private func updateLayout(on screen: ScreenOverlay, studio: CGRect?, hasOrnaments: Bool) {
         let region = screen.local(screen.frame)
         var placements: [(Ornament, CGRect, DesktopWindow?)] = []
+        var draggedPlacement: (Ornament, CGRect, DesktopWindow?)?
         let mainScreen = NSScreen.screens.first?.snowScreenID
         if hasOrnaments {
             for ornament in model.settings.ornaments where ornament.id != workshopSource {
+                if let dragSession, let preview = dragSession.preview, dragSession.handle.ornament == ornament.id {
+                    if preview.display == screen.id { draggedPlacement = (ornament, screen.local(preview.frame), nil) }
+                    continue
+                }
                 if let anchor = ornament.anchor {
                     guard let target = layoutAnchor(anchor), target.rect.intersects(screen.frame) else { continue }
                     let rect = screen.local(target.rect)
@@ -987,10 +1125,13 @@ final class DesktopEngine {
                         placements.append((ornament, frame, target))
                     }
                 } else if ornament.display == screen.id || (screens[ornament.display] == nil && screen.id == mainScreen) {
-                    placements.append((ornament, screen.local(screen.place(ornament)), nil))
+                    let dock = dockEdge == .bottom ? dockFrames[screen.id] : nil
+                    let frame = screen.place(ornament, dock: dock)
+                    placements.append((ornament, screen.local(frame), nil))
                 }
             }
         }
+        if let draggedPlacement { placements.append(draggedPlacement) }
         screen.placements = placements
         var surfaces: [SnowSurface] = []
         var covers = studio.map { [screen.local($0)] } ?? []
@@ -1058,20 +1199,6 @@ final class DesktopEngine {
         if !isBack && model.running && idleScene && settings.idleDim { ink.fill(bounds, 0x071526, alpha: 0.30) }
         if model.running {
             ink.ctx.saveGState()
-            if isBack, let id = settings.wallpaper, Wallpaper.all.first(where: { $0.id == id })?.showsWindowView == true {
-                let path = CGMutablePath()
-                let scale = max(bounds.width / 1200, bounds.height / 750)
-                let dx = (bounds.width - scale * 1200) / 2
-                let dy = (bounds.height - scale * 750) / 2
-                for x in [CGFloat(86), 608] {
-                    for (y, height) in [(CGFloat(59), CGFloat(281)), (352, 302)] {
-                        path.addRect(CGRect(x: dx + x * scale, y: dy + y * scale,
-                                            width: 506 * scale, height: height * scale))
-                    }
-                }
-                ink.ctx.addPath(path)
-                ink.ctx.clip()
-            }
             if isBack {
                 paintFlakes(screen.sim.flakes, ink: ink, dirty: dirty)
             } else if settings.layer != .behindWindows || idleScene {
@@ -1125,16 +1252,25 @@ final class DesktopEngine {
             for fall in screen.fallingSnowmen {
                 DecorationArt.draw(fall.ornament, in: fall.rect, with: ink, time: motionTime, now: Date())
             }
+            for wreck in screen.plowedSnowmen {
+                for part in wreck.parts where dirty.intersects(part.bounds(dressed: true)) {
+                    SnowmanArt.drawPart(part, wearing: wreck.ornament, ink: ink)
+                }
+            }
+            for wreck in screen.plowedDecorations where dirty.intersects(wreck.ornament.paintBounds(in: wreck.frame)) {
+                ink.ctx.saveGState()
+                ink.ctx.setAlpha(wreck.opacity)
+                DecorationArt.draw(wreck.ornament, in: wreck.frame, with: ink, time: motionTime, now: Date())
+                ink.ctx.restoreGState()
+            }
             paintFlakes(screen.sim.released, ink: ink, dirty: dirty)
             if let workshop {
+                let source = settings.ornaments.first { $0.id == workshopSource }
                 for ball in workshop.balls where workshop.revealed(ball.id) {
-                    let center = screen.local(CGRect(origin: ball.center, size: .zero)).origin
-                    ink.ctx.saveGState()
-                    ink.ctx.translateBy(x: center.x, y: center.y)
-                    if !reducedMotion { ink.ctx.rotate(by: ball.spin) }
-                    let tone = ball.id == workshop.balls.count - 1 ? 2 : ball.id
-                    SnowmanArt.ball(.zero, radius: ball.radius, ink: ink, tone: tone)
-                    ink.ctx.restoreGState()
+                    let part = workshopPart(ball, in: workshop, on: screen)
+                    if dirty.intersects(part.bounds(dressed: source != nil)) {
+                        SnowmanArt.drawPart(part, wearing: source, ink: ink)
+                    }
                 }
                 if screen.id == workshopDisplay {
                     let hint = workshopHint(in: bounds)
@@ -1179,85 +1315,121 @@ final class DesktopEngine {
     }
 
     private func updateHandles(_ studio: CGRect?, showing: Bool) {
-        var present = Set<UUID>()
+        var present = Set<OrnamentHandleKey>()
         if showing {
+            let grabbed = dragSession?.handle
+            // AppKit continues sending drag events to the panel that received mouse-down.
+            if let grabbed { present.insert(grabbed) }
             for screen in screens.values {
-                for (ornament, rect, target) in screen.placements {
-                    let snowman = ornament.kind == .snowman
-                    let editing = model.editMode && target == nil
-                    guard editing || snowman || ornament.kind == .calendar else { continue }
+                for (ornament, rect, target) in screen.placements where ornament.id != grabbed?.ornament {
                     let frame = screen.global(rect)
-                    let hitFrame = snowman && !editing
-                        ? frame.insetBy(dx: frame.width * 0.15, dy: frame.height * 0.047)
-                        : frame
-                    guard studio?.intersects(hitFrame) != true else { continue }
-                    if let target, windows.prefix(while: { $0.id != target.id }).contains(where: { $0.rect.intersects(hitFrame) }) {
-                        continue
-                    }
-                    present.insert(ornament.id)
-                    let (panel, view) = handles[ornament.id] ?? makeHandle(for: ornament.id, frame: hitFrame)
-                    if panel.frame != hitFrame { panel.setFrame(hitFrame, display: false) }
-                    if !panel.isVisible { panel.orderFrontRegardless() }
-                    let id = ornament.id
-                    if snowman {
-                        view.editTitle = "给雪人换装"
-                        view.settings = { [weak self] in self?.model.showWardrobe?(id, frame) }
-                        view.knock = model.editMode ? nil : { [weak self, weak screen] in
-                            if let screen { self?.knockSnowman(ornament, from: frame, on: screen) }
+                    let mountedLights = target != nil && ornament.kind == .lights
+                    let regions = mountedLights ? DecorationArt.windowLightHitRegions(ornament, in: rect)
+                        : [model.editMode ? rect : ornament.interactionFrame(in: rect)]
+                    var covers = studio.map { [$0] } ?? []
+                    if let target { covers += windows.prefix { $0.id != target.id }.map(\.rect) }
+                    for (index, region) in regions.enumerated() {
+                        let visible = screen.global(region).intersection(screen.frame)
+                        guard !visible.isEmpty else { continue }
+                        let clear = covers.reduce([visible]) { frames, cover in frames.flatMap { $0.areasOutside(cover) } }
+                        guard let hitFrame = clear.max(by: { $0.width * $0.height < $1.width * $1.height }),
+                              hitFrame.width > 2, hitFrame.height > 2 else { continue }
+                        let key = OrnamentHandleKey(ornament: ornament.id, display: screen.id, region: index)
+                        present.insert(key)
+                        let (panel, view) = handles[key] ?? makeHandle(for: key, frame: hitFrame)
+                        if panel.frame != hitFrame { panel.setFrame(hitFrame, display: false) }
+                        if ornament.kind == .snowman {
+                            view.editTitle = "给雪人换装"
+                            view.settings = { [weak self] in self?.model.showWardrobe?(ornament.id, frame) }
+                            view.knock = model.editMode ? nil : { [weak self, weak screen] in
+                                if let screen { self?.knockSnowman(ornament, from: frame, on: screen) }
+                            }
                         }
+                        view.down = { [weak self] point in
+                            self?.handleDown(key, ornament: ornament, point: point, frame: frame, mountedLights: mountedLights)
+                        }
+                        view.up = { [weak self] point in self?.handleUp(key, point: point, frame: frame) }
+                        if !panel.isVisible { panel.orderFrontRegardless() }
                     }
-                    view.drag = editing ? { [weak self] point in self?.drag(id, to: point) } : nil
-                    view.down = editing ? { [weak self] point in self?.handleDown(id, point: point, frame: frame) } : nil
-                    view.up = { [weak self] point in self?.handleUp(id, point: point, frame: frame) }
                 }
             }
         }
-        for id in Array(handles.keys) where !present.contains(id) {
-            handles.removeValue(forKey: id)?.0.orderOut(nil)
+        for key in Array(handles.keys) where !present.contains(key) {
+            handles.removeValue(forKey: key)?.0.orderOut(nil)
         }
     }
 
-    private func makeHandle(for id: UUID, frame: CGRect) -> (OverlayPanel, HandleView) {
+    private func removeHandles(for ornaments: Set<UUID>) {
+        for key in Array(handles.keys) where ornaments.contains(key.ornament) {
+            handles.removeValue(forKey: key)?.0.orderOut(nil)
+        }
+    }
+
+    private func makeHandle(for key: OrnamentHandleKey, frame: CGRect) -> (OverlayPanel, HandleView) {
         let panel = OverlayPanel(frame: frame, level: .init(rawValue: overlayLevel.rawValue + 1), interactive: true)
         let view = HandleView()
         panel.contentView = view
+        let id = key.ornament
+        view.drag = { [weak self] point in self?.drag(key, to: point) }
         view.remove = { [weak self] in self?.model.remove(id) }
         view.settings = { [weak self] in
             self?.model.selectedOrnament = id
             self?.model.showStudio?()
         }
-        handles[id] = (panel, view)
+        handles[key] = (panel, view)
         return (panel, view)
     }
 
-    private func handleDown(_ id: UUID, point: CGPoint, frame: CGRect) {
-        guard model.editMode else { return }
-        model.selectedOrnament = id
-        dragSession = (id, point, p(frame.midX, frame.midY))
-        workingPlacement = false
+    private func handleDown(_ key: OrnamentHandleKey, ornament: Ornament, point: CGPoint, frame: CGRect, mountedLights: Bool) {
+        if model.editMode { model.selectedOrnament = key.ornament }
+        var center = p(frame.midX, frame.midY)
+        if mountedLights {
+            let fraction = min(1, max(0, (point.x - frame.minX) / frame.width))
+            let grip = DecorationArt.desktopLightPoint(at: fraction)
+            let size = ornament.kind.size
+            let angle = ornament.rotation * .pi / 180
+            let x = (grip.x - size.width / 2) * ornament.scale
+            let y = (grip.y + 4 - size.height / 2) * ornament.scale
+            center = p(point.x - x * cos(angle) + y * sin(angle), point.y + x * sin(angle) + y * cos(angle))
+        }
+        dragSession = OrnamentDragSession(handle: key, start: point, center: center)
     }
 
-    private func drag(_ id: UUID, to point: CGPoint) {
-        guard let session = dragSession, session.id == id else { return }
+    private func drag(_ key: OrnamentHandleKey, to point: CGPoint) {
+        guard let session = dragSession, session.handle == key else { return }
         let dx = point.x - session.start.x
         let dy = point.y - session.start.y
-        guard workingPlacement || hypot(dx, dy) > 3 else { return }
-        guard let screen = screens.values.first(where: { $0.frame.contains(point) }) else { return }
-        workingPlacement = true
-        let x = (session.center.x + dx - screen.usable.minX) / screen.usable.width
-        let y = (session.center.y + dy - screen.usable.minY) / screen.usable.height
-        model.change(id) {
-            $0.display = screen.id
-            $0.x = min(0.98, max(0.02, x))
-            $0.y = min(0.98, max(0.02, y))
-        }
+        guard session.preview != nil || hypot(dx, dy) > 3,
+              let screen = screens.values.first(where: { $0.frame.contains(point) }),
+              let ornament = model.settings.ornaments.first(where: { $0.id == key.ornament }) else { return }
+        let frame = ornament.desktopFrame(center: p(session.center.x + dx, session.center.y + dy), inside: screen.frame, free: true)
+        guard session.preview?.display != screen.id || session.preview?.frame != frame else { return }
+        dragSession?.preview = (screen.id, frame)
+        dragLayoutDirty = true
+        snowmanPerches.removeValue(forKey: key.ornament)
     }
 
-    private func handleUp(_ id: UUID, point: CGPoint, frame: CGRect) {
-        let wasDragging = workingPlacement
+    private func cancelOrnamentDrag() {
+        guard dragSession != nil else { return }
         dragSession = nil
-        workingPlacement = false
-        guard !wasDragging, let ornament = model.settings.ornaments.first(where: { $0.id == id }) else { return }
+        layoutDirty = true
+    }
+
+    private func handleUp(_ key: OrnamentHandleKey, point: CGPoint, frame: CGRect) {
+        guard dragSession?.handle == key else { return }
+        drag(key, to: point)
+        let dropped = dragSession?.preview
+        cancelOrnamentDrag()
+        let id = key.ornament
+        if let dropped {
+            if let screen = screens[dropped.display] {
+                model.change(id) {
+                    $0.placeOnDesktop(at: p(dropped.frame.midX, dropped.frame.midY), displayID: screen.id, display: screen.frame)
+                }
+            }
+            return
+        }
+        guard let ornament = model.settings.ornaments.first(where: { $0.id == id }) else { return }
         if ornament.kind == .snowman { model.showWardrobe?(id, frame); return }
         guard ornament.kind == .calendar else { return }
         let angle = -ornament.rotation * .pi / 180

@@ -269,6 +269,9 @@ enum SnowArt {
 }
 
 enum SnowplowArt {
+    static let bladeNoseOffset: CGFloat = 8
+    static let bladeReach: CGFloat = 22
+
     static func draw(_ pass: PlowPass, on floor: SnowSurface, ink: Ink) {
         let x = floor.rect.minX + pass.bladeX(width: floor.rect.width)
         let y = floor.rect.minY

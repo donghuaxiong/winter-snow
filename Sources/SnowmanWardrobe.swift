@@ -4,6 +4,26 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct SnowmanWardrobe: View {
+    static let preferredContentSize = CGSize(width: 344, height: 420)
+
+    static func windowFrame(preferredSize: CGSize, beside anchor: CGRect?, currentFrame: CGRect,
+                            in visibleFrame: CGRect) -> CGRect {
+        let usable = visibleFrame.insetBy(dx: 9, dy: 9)
+        let width = min(preferredSize.width, usable.width)
+        let height = min(preferredSize.height, usable.height)
+        let x: CGFloat
+        if let anchor {
+            let right = anchor.maxX + 13
+            x = right + width <= usable.maxX ? right : anchor.minX - 13 - width
+        } else {
+            x = currentFrame.minX
+        }
+        let top = anchor.map { $0.maxY + 68 } ?? currentFrame.maxY
+        return CGRect(x: max(usable.minX, min(usable.maxX - width, x)),
+                      y: max(usable.minY, min(usable.maxY - height, top - height)),
+                      width: width, height: height)
+    }
+
     private enum Category: String, CaseIterable, Identifiable {
         case hats = "帽饰", face = "表情", body = "身体", clothes = "衣物"
         var id: Self { self }
@@ -30,6 +50,7 @@ struct SnowmanWardrobe: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .accessibilityLabel("换装类别")
+                .fixedSize(horizontal: false, vertical: true)
                 ScrollView {
                     PickList(item: item)
                         .padding(.top, 2)
@@ -61,12 +82,13 @@ struct SnowmanWardrobe: View {
                     }
                     .buttonStyle(.plain)
                 }
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 13)
-        .padding(.top, 24)
-        .frame(width: 344, height: 456)
+        .padding(.top, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
             LinearGradient(colors: [Color(red: 0.08, green: 0.16, blue: 0.23),
                                     Color(red: 0.05, green: 0.099, blue: 0.15)],

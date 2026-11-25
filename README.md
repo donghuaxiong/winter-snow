@@ -1,33 +1,65 @@
 # Snowglow 雪灯桌面
 
-Snowglow 是 macOS 14 或更新版本的原生菜单栏应用，支持 Apple 芯片、Intel 芯片和多显示器。双击 `dist/Snowglow.app`，再从菜单栏的雪花打开工作台。
+让雪落在桌面、窗沿和屏幕底边。为雪人换装，挂一串彩灯，或挑一张圣诞夜壁纸。
 
-- **降雪**可以调节密度、风向、速度和窗口前后层。雪会积在窗口、程序坞、桌面小组件和屏幕底部。光标扫过雪层会拨开积雪，带起雪粉。最小化窗口、台前调度收起窗口，或握住标题栏左右快速晃动，窗沿的雪会掉到屏幕底部并继续堆积。
-- **锁屏飘雪**适用于已下载过系统动态壁纸的 macOS 26。通过降雪设置或菜单栏启用后，「雪夜木屋」会同时成为锁屏和桌面壁纸。可选「恢复原壁纸」。
-- **铲雪车**默认启用。每块屏幕底部积到一定厚度，铲雪车就会驶过来，一路把雪推开。铲板翻起的部分雪块会落回屏幕底部，留下薄薄的雪脊。可以在「降雪」页关闭自动铲雪，或点「立即铲雪」手动运行一次。
-- **装饰**可以添加雪人、圣诞树、彩灯、提灯、礼物、花环和倒数日历。“在桌面摆放”允许拖动装饰。也可用设置面板内的位置控件操作，或选一个真实窗口把装饰固定在它上面。
-- **雪夜木屋**在「降雪」页或菜单栏中一键应用。它会启用飘雪、积雪、自动铲雪，并换上原创木屋壁纸。
-- **堆雪人**从菜单栏或「装饰」页进入。选一个窗口或桌面，从大到小拖动叠放雪球。装好后在衣帽间换帽子、表情、围巾和身体，并能分享透明背景的雪人图。也可右键雪人选择「推倒重堆」，再点任一雪球把雪人堆起来。窗口上的雪人会跟随移动，最小化时掉落并散成雪粉。
-- **壁纸**提供 32 张冬景，应用后可在同一页恢复之前的壁纸。
-- **场景**可以保存当前雪况、壁纸和装饰布局。点菜单栏的雪花也可暂停降雪、清雪、预览空闲模式或退出。
+[下载最新版](https://github.com/donghuaxiong/winter-snow/releases/latest) · [使用说明](#安装与启动) · [从源码构建](#从源码构建)
 
-空闲效果由 Snowglow 自行触发。macOS 的屏幕保护程序、锁屏和屏幕休眠仍按系统设置工作。应用通过窗口的位置和尺寸绘制积雪，设置保存在这台 Mac 上。
+![Snowglow 的雪夜木屋壁纸。暖色窗灯照亮雪地，远处是深蓝色的雪山。](Resources/WinterCabin.jpg)
 
-## 构建与自检
+## 下载
 
-在装有 Xcode 的 Mac 上运行：
+| 你的电脑 | 下载文件 |
+| --- | --- |
+| Apple 芯片 Mac 或 Intel Mac，macOS 14 及以上 | [macOS 通用版 DMG](https://github.com/donghuaxiong/winter-snow/releases/latest/download/Snowglow-macOS-Universal.dmg) |
+| Intel Mac，macOS 14 及以上 | [macOS Intel 专用版 DMG](https://github.com/donghuaxiong/winter-snow/releases/latest/download/Snowglow-macOS-Intel.dmg) |
+| Intel / AMD 电脑，Windows 11 | [Windows x64 EXE](https://github.com/donghuaxiong/winter-snow/releases/latest/download/Snowglow-Windows-x64.exe) |
+| ARM 电脑或 Apple 芯片 Mac 上的 Parallels Windows 11 | [Windows ARM64 EXE](https://github.com/donghuaxiong/winter-snow/releases/latest/download/Snowglow-Windows-ARM64.exe) |
+
+Mac 用户选通用版即可。发布页提供 [SHA-256 校验文件](https://github.com/donghuaxiong/winter-snow/releases/latest/download/SHA256SUMS.txt)。
+
+## 安装与启动
+
+**macOS**
+
+打开 DMG，把 Snowglow 拖到「应用程序」，再从「应用程序」启动。之后可以点菜单栏的雪花图标打开设置。当前安装包使用 ad hoc 签名，尚未经过 Apple 公证。若首次打开时系统提示无法验证开发者，请先确认下载来源和校验值，再按需要使用 Apple 提供的单个应用放行方式。[Apple 的打开方式](https://support.apple.com/zh-cn/102445)
+
+**Windows**
+
+下载对应芯片的 EXE，双击运行。程序内置 .NET 运行时，无需另外安装。关闭设置窗后，仍可从任务栏通知区域的雪花图标打开设置或退出。如果图标被折叠，点通知区域的向上箭头。
+
+本次 EXE 未做 Authenticode 签名，首次下载运行时可能出现 SmartScreen 提示。运行前请确认下载来源并核对 SHA-256。[Microsoft 的 SmartScreen 说明](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation)
+
+## 可以做什么
+
+- **桌面降雪**可调节雪量、速度、风向和前后层。雪会在窗沿和屏幕底部堆积，移窗时跟随，最小化或关闭时滑落。光标经过积雪会扬起雪粉。
+- **铲雪和冰柱**可以独立控制。底部积雪够厚时铲雪车会自动出动，也可手动发车。车是否会移除装饰由你决定。
+- **桌面装饰**有雪人、圣诞树、彩灯、提灯、礼物和倒数日历。装饰可安排在桌面或挂到窗口，雪人可换帽饰、表情和围巾。
+- **壁纸和场景**提供 12 张冬景，其中 4 张是圣诞夜主题。可以恢复原壁纸，也可以保存整套雪况、壁纸和装饰布局。
+
+| 功能 | macOS | Windows |
+| --- | --- | --- |
+| 底部积雪 | Dock 和屏幕底边 | 任务栏上沿和屏幕底边 |
+| 窗口与装饰 | 支持台前调度收起时落雪，提供拖雪球工作坊和多个雪人 | 支持窗口最小化落雪和装饰跨屏摆放，当前支持一个雪人 |
+| 空闲与锁屏 | 空闲预览。macOS 26 已下载过系统动态壁纸时可启用「雪夜木屋」锁屏飘雪 | 登录后的空闲飘雪、调暗和全屏预览 |
+
+## 从源码构建
+
+macOS 需要 Xcode 命令行工具。
 
 ```sh
 ./build.sh
 ./dist/Snowglow.app/Contents/MacOS/Snowglow --self-test
+./Tools/package-macos.sh
 ```
 
-`./build.sh --native` 仅构建当前 Mac 的架构。构建产出位于 `dist/Snowglow.app`，使用本地 ad hoc 签名。
+`./build.sh` 生成通用应用，`--native` 仅构建当前芯片。打包脚本生成通用版和 Intel 专用版 DMG。
 
-使用 `swift Tools/render-lock-snow.swift Resources` 重新生成随应用打包的锁屏雪景。
+Windows 需要 .NET 10 SDK。在 macOS 或其他有 POSIX shell 的环境运行下方命令可同时发布两个架构。Windows 上的构建命令和故障日志位置见 [Windows 开发说明](Windows/README.md)。
 
-## 雪夜木屋壁纸
+```sh
+./Windows/publish.sh
+```
 
-`Resources/WinterCabin.jpg` 由内置 ImageGen 生成。原始提示词如下。
+## 许可证
 
-> Use case: illustration-story. Asset type: full-bleed ultrawide macOS desktop wallpaper for Snowglow, 16:9 landscape. Create an original high-detail winter storybook painting, warm Christmas cabin lights against a rich cobalt winter night. In the left third: a close and clearly legible timber A-frame chalet, with deeply snow piled on roofs, solid log porch, carved railing, amber lanterns and a tidy strand of tiny warm yellow bulbs along its gable and porch. Honey-orange light shines through the divided windows and casts warm peach accents onto the snow around the steps. Cabin roof peak at about 35 percent of image height, snow-filled path and dark rounded boulders in foreground. Snow-laden black spruce branches enter from the top left and drape along the upper edge, their underside catching some peach firelight. Central and right thirds have airy open deep Prussian blue night sky with a few tiny stars, ridged snowy mountains and dark evergreens concentrated toward the horizon and right edge, leaving dark low-contrast negative space for desktop windows on the right. Ground is undulating blue and lilac powder with amber reflection from the house. Winter dusk atmospheric perspective, crisp graphic snow banks, painterly dark spruce needles and detailed warm carved timber, rich atmospheric depth, balanced saturation, convincing contrast. This is pure wallpaper artwork without any lettering, watermarks, laptop, windows overlays, software interfaces, pointer, snowman, vehicle, or borders. No falling snow specks besides a few distant stars, because the app renders moving snowfall separately. Fill the frame.
+[MIT](LICENSE)

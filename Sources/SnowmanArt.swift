@@ -1,5 +1,18 @@
 import AppKit
 
+struct SnowmanPart {
+    let tone: Int
+    let radius: CGFloat
+    var center: CGPoint
+    var angle: CGFloat = 0
+
+    func bounds(dressed: Bool) -> CGRect {
+        let scale = radius / SnowmanArt.radii[tone]
+        let extent = dressed ? [56.0, 56.0, 49.0][tone] * scale : radius
+        return CGRect(around: center, radius: extent + 3)
+    }
+}
+
 enum SnowmanArt {
     static let baseline: CGFloat = 150
     static let workshopScale: CGFloat = 0.62
@@ -30,7 +43,27 @@ enum SnowmanArt {
         (first + second) * 0.825
     }
 
+    static func structure(for ornament: Ornament) -> [(tone: Int, y: CGFloat)] {
+        let bodyTone = ornament.snowballs == 2 ? 0 : 1
+        let base = baseline - radii[0]
+        let body = bodyTone == 0 ? base : base - gap(radii[0], radii[1])
+        let head = body - gap(radii[bodyTone], radii[2])
+        return bodyTone == 0 ? [(0, base), (2, head)] : [(0, base), (1, body), (2, head)]
+    }
+
+    static func parts(for ornament: Ornament, in rect: CGRect) -> [SnowmanPart] {
+        let angle = ornament.rotation * .pi / 180
+        let height = OrnamentKind.snowman.size.height
+        let scale = rect.height / height
+        return structure(for: ornament).map { tone, y in
+            let offset = (y - height / 2) * scale
+            return SnowmanPart(tone: tone, radius: radii[tone] * scale,
+                               center: p(rect.midX - offset * sin(angle), rect.midY + offset * cos(angle)), angle: angle)
+        }
+    }
+
     static func ball(_ center: CGPoint, radius: CGFloat, ink: Ink, tone: Int = 0) {
+        if Ornament3D.drawSnowball(at: center, radius: radius, tone: tone, with: ink) { return }
         let bounds = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
         ink.ctx.saveGState()
         ink.ctx.addEllipse(in: bounds)
@@ -49,31 +82,58 @@ enum SnowmanArt {
     }
 
     static func draw(_ ornament: Ornament, ink: Ink) {
-        let costume = ornament.costume
         let x: CGFloat = 62
-        let r = radii
-        let baseY = baseline - r[0]
-        let bodyY = ornament.snowballs == 2 ? baseY : baseY - gap(r[0], r[1])
-        let headY = bodyY - gap(ornament.snowballs == 2 ? r[0] : r[1], r[2])
-
+        let parts = structure(for: ornament)
+        let bodyTone = ornament.snowballs == 2 ? 0 : 1
+        let bodyY = parts[parts.count - 2].y
         ink.oval(CGRect(x: x - 27, y: baseline - 2.2, width: 54, height: 5.6), 0x112b4b, alpha: 0.25)
-        if costume.arms {
-            ink.line([p(x - 19, bodyY + 4), p(x - 35, bodyY - 7), p(x - 42, bodyY - 18)], 0x634539, width: 2.8)
-            ink.line([p(x - 36, bodyY - 8), p(x - 45, bodyY - 10)], 0x8a654c, width: 2.0)
-            ink.line([p(x + 19, bodyY + 3), p(x + 36, bodyY - 8), p(x + 46, bodyY - 15)], 0x634539, width: 2.8)
-            ink.line([p(x + 37, bodyY - 9), p(x + 37, bodyY - 18)], 0x8a654c, width: 1.9)
+        if ornament.costume.arms { drawArms(at: p(x, bodyY), ink: ink) }
+        for part in parts { ball(p(x, part.y), radius: radii[part.tone], ink: ink, tone: part.tone) }
+        drawBodyDecorations(ornament, tone: bodyTone, at: p(x, bodyY), ink: ink)
+        drawHeadDecorations(ornament, at: p(x, parts[parts.count - 1].y), ink: ink)
+    }
+
+    static func drawPart(_ part: SnowmanPart, wearing ornament: Ornament?, ink: Ink) {
+        let scale = part.radius / radii[part.tone]
+        let ctx = ink.ctx
+        ctx.saveGState()
+        ctx.translateBy(x: part.center.x, y: part.center.y)
+        ctx.rotate(by: part.angle)
+        ctx.scaleBy(x: scale, y: scale)
+        defer { ctx.restoreGState() }
+
+        let isBody = ornament.map { part.tone == ($0.snowballs == 2 ? 0 : 1) } ?? false
+        if isBody, ornament?.costume.arms == true { drawArms(at: .zero, ink: ink) }
+        ball(.zero, radius: radii[part.tone], ink: ink, tone: part.tone)
+        if let ornament {
+            if isBody { drawBodyDecorations(ornament, tone: part.tone, at: .zero, ink: ink) }
+            if part.tone == 2 { drawHeadDecorations(ornament, at: .zero, ink: ink) }
         }
-        ball(p(x, baseY), radius: r[0], ink: ink, tone: 0)
-        if ornament.snowballs != 2 { ball(p(x, bodyY), radius: r[1], ink: ink, tone: 1) }
-        ball(p(x, headY), radius: r[2], ink: ink, tone: 2)
-        if costume.buttons {
+    }
+
+    private static func drawArms(at center: CGPoint, ink: Ink) {
+        let x = center.x
+        let y = center.y
+        ink.line([p(x - 19, y + 4), p(x - 35, y - 7), p(x - 42, y - 18)], 0x634539, width: 2.8)
+        ink.line([p(x - 36, y - 8), p(x - 45, y - 10)], 0x8a654c, width: 2.0)
+        ink.line([p(x + 19, y + 3), p(x + 36, y - 8), p(x + 46, y - 15)], 0x634539, width: 2.8)
+        ink.line([p(x + 37, y - 9), p(x + 37, y - 18)], 0x8a654c, width: 1.9)
+    }
+
+    private static func drawBodyDecorations(_ ornament: Ornament, tone: Int, at center: CGPoint, ink: Ink) {
+        if ornament.costume.buttons {
             for (index, offset) in [CGFloat(-0.8), 7.8, 16.2].enumerated() {
-                ink.circle(x + sin(CGFloat(index) * 1.15) * 1.4, bodyY + offset, 1.9 - CGFloat(index) * 0.12, 0x283949)
+                ink.circle(center.x + sin(CGFloat(index) * 1.15) * 1.4, center.y + offset,
+                           1.9 - CGFloat(index) * 0.12, 0x283949)
             }
         }
-        drawScarf(costume.scarf, palette: ornament.colors[0], at: p(x, headY + 14.5), ink: ink)
-        drawFace(costume.face, at: p(x, headY), ink: ink)
-        drawHat(ornament.hat, at: p(x, headY - 10.5), accent: ornament.colors[0], ink: ink)
+        let neck = center.y - gap(radii[tone], radii[2]) + 14.5
+        drawScarf(ornament.costume.scarf, palette: ornament.colors[0], at: p(center.x, neck), ink: ink)
+    }
+
+    private static func drawHeadDecorations(_ ornament: Ornament, at center: CGPoint, ink: Ink) {
+        drawFace(ornament.costume.face, at: center, ink: ink)
+        drawHat(ornament.hat, at: p(center.x, center.y - 10.5), accent: ornament.colors[0], ink: ink)
     }
 
     static func drawFace(_ face: SnowmanFace, at position: CGPoint, ink: Ink) {

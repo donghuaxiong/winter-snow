@@ -10,35 +10,74 @@ enum DecorationArt {
         ink.ctx.translateBy(x: -size.width / 2, y: -size.height / 2)
         let accent = ornament.colors[0]
         switch ornament.kind {
-        case .snowman: SnowmanArt.draw(ornament, ink: ink)
-        case .tree: tree(ink, ornament)
+        case .snowman:
+            if !Ornament3D.draw(ornament, in: size, with: ink) { SnowmanArt.draw(ornament, ink: ink) }
+        case .tree:
+            if !Ornament3D.draw(ornament, in: size, with: ink) { tree(ink, ornament) }
         case .lantern: lantern(ink, accent: accent, time: time)
-        case .gift: gift(ink, accent: accent)
-        case .wreath: wreath(ink, colors: ornament.colors)
+        case .gift:
+            if !Ornament3D.draw(ornament, in: size, with: ink) { gift(ink, accent: accent) }
+        case .wreath: break
         case .calendar: calendar(ink, ornament, now: now)
         case .lights:
-            let points = (0...24).map { i -> CGPoint in
-                let fraction = CGFloat(i) / 24
-                return p(10 + fraction * 240, 12 + sin(fraction * .pi) * 18)
-            }
+            let points = (0...24).map { desktopLightPoint(at: CGFloat($0) / 24) }
             lights(ink, points: points, ornament: ornament, time: time)
         }
         ink.ctx.restoreGState()
     }
 
+    static func desktopLightPoint(at fraction: CGFloat) -> CGPoint {
+        p(10 + fraction * 240, 12 + sin(fraction * .pi) * 18)
+    }
+
+    private static func windowLightWire(in rect: CGRect) -> CGRect {
+        CGRect(x: rect.minX + 4, y: rect.minY + 6, width: max(0, rect.width - 8), height: max(0, rect.height - 9))
+    }
+
+    private static func windowLightSag(at fraction: CGFloat, width: CGFloat) -> CGFloat {
+        sin(fraction * .pi) * min(width / 25, 14)
+    }
+
+    static func windowLightHitRegions(_ ornament: Ornament, in rect: CGRect) -> [CGRect] {
+        let wire = windowLightWire(in: rect)
+        let sidePad = max(4, 5.5 * ornament.scale)
+        let topPad = max(3, 2.5 * ornament.scale)
+        let bottomPad = max(7, (ornament.bulb == .icicle ? 21 : 10) * ornament.scale)
+        if ornament.placement == .windowTop {
+            return (0..<4).map { index in
+                let start = CGFloat(index) / 4
+                let end = CGFloat(index + 1) / 4
+                let firstY = windowLightSag(at: start, width: wire.width)
+                let lastY = windowLightSag(at: end, width: wire.width)
+                return CGRect(x: wire.minX + wire.width * start - sidePad, y: wire.minY + min(firstY, lastY) - topPad,
+                              width: wire.width / 4 + 2 * sidePad, height: abs(firstY - lastY) + topPad + bottomPad)
+            }
+        }
+        return [
+            CGRect(x: wire.minX - sidePad, y: wire.minY - topPad,
+                   width: wire.width + 2 * sidePad, height: topPad + bottomPad),
+            CGRect(x: wire.maxX - sidePad, y: wire.minY - topPad,
+                   width: 2 * sidePad, height: wire.height + topPad + bottomPad),
+            CGRect(x: wire.minX - sidePad, y: wire.maxY - topPad,
+                   width: wire.width + 2 * sidePad, height: topPad + bottomPad),
+            CGRect(x: wire.minX - sidePad, y: wire.minY - topPad,
+                   width: 2 * sidePad, height: wire.height + topPad + bottomPad),
+        ]
+    }
+
     static func windowLights(_ ornament: Ornament, rect: CGRect, ink: Ink, time: Double) {
-        let box = rect.insetBy(dx: 4, dy: 3)
+        let box = windowLightWire(in: rect)
         let spacing = max(12, 19 * ornament.scale)
         let steps = min(180, max(2, Int(box.width / spacing)))
-        let y = box.minY + 3
+        let y = box.minY
         var points: [CGPoint] = []
         if ornament.placement == .windowTop {
             for i in 0...steps {
                 let fraction = CGFloat(i) / CGFloat(steps)
-                points.append(p(box.minX + box.width * fraction, y + sin(fraction * .pi) * min(box.width / 25, 14)))
+                points.append(p(box.minX + box.width * fraction, y + windowLightSag(at: fraction, width: box.width)))
             }
         } else {
-            let vertical = min(100, max(2, Int(box.height / spacing)))
+            let vertical = min(100, max(2, Int((box.height + 3) / spacing)))
             for i in 0..<steps { points.append(p(box.minX + box.width * CGFloat(i) / CGFloat(steps), y)) }
             for i in 0..<vertical {
                 points.append(p(box.maxX, y + (box.maxY - y) * CGFloat(i) / CGFloat(vertical)))
@@ -138,25 +177,6 @@ enum DecorationArt {
         ink.rounded(CGRect(x: 37, y: 25, width: 10, height: 46), 2, accent)
         ink.line([p(42, 25), p(26, 20), p(22, 14), p(28, 10), p(35, 15), p(42, 25),
                   p(50, 15), p(58, 12), p(61, 17), p(55, 22), p(42, 25)], accent, width: 3)
-    }
-
-    private static func wreath(_ ink: Ink, colors: [UInt32]) {
-        for index in 0..<65 {
-            let angle = CGFloat(index) * .pi * 2 / 65
-            let x = 51 + cos(angle) * 34
-            let y = 52 + sin(angle) * 34
-            ink.circle(x, y, 8.4, index.isMultiple(of: 2) ? 0x447e66 : 0x2a6658)
-            if index.isMultiple(of: 5) {
-                ink.circle(x + 2.5, y - 1.8, 2.7, colors[index % colors.count])
-                ink.circle(x + 1.8, y - 2.5, 0.7, 0xffffff, alpha: 0.67)
-            }
-        }
-        let accent = colors[0]
-        ink.poly([p(49, 32), p(40, 48), p(34, 44), p(45, 29)], accent)
-        ink.poly([p(50, 30), p(64, 45), p(59, 47), p(49, 34)], accent)
-        ink.oval(CGRect(x: 32, y: 22, width: 21, height: 12), accent)
-        ink.oval(CGRect(x: 49, y: 22, width: 20, height: 12), accent)
-        ink.circle(50, 29, 5, 0xffe2a1)
     }
 
     static func calendarDoorRect(_ day: Int) -> CGRect {

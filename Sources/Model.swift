@@ -15,7 +15,10 @@ enum SnowLayer: String, Codable, CaseIterable, Identifiable {
 }
 
 enum OrnamentKind: String, Codable, CaseIterable, Identifiable {
-    case snowman, tree, lights, lantern, gift, wreath, calendar
+    case snowman, tree, lights, lantern, gift, calendar
+    case wreath // Kept for decoding older scenes.
+
+    static let allCases: [Self] = [.snowman, .tree, .lights, .lantern, .gift, .calendar]
     var id: Self { self }
 
     var title: String {
@@ -27,18 +30,6 @@ enum OrnamentKind: String, Codable, CaseIterable, Identifiable {
         case .gift: "礼物"
         case .wreath: "花环"
         case .calendar: "倒数日历"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .snowman: "snowman"
-        case .tree: "tree"
-        case .lights: "lightbulb"
-        case .lantern: "flame"
-        case .gift: "gift"
-        case .wreath: "circle.hexagongrid"
-        case .calendar: "calendar"
         }
     }
 
@@ -198,6 +189,8 @@ struct Ornament: Codable, Identifiable, Equatable {
     var anchor: WindowAnchor?
     var hat: Hat = .top
     var snowballs = 3
+    var snowmanFollowsGround: Bool?
+    var usesDisplayCoordinates: Bool?
     var extras = true
     private var snowmanCostume: SnowmanCostume?
     var calendarStart = Date()
@@ -234,6 +227,7 @@ struct SnowSettings: Codable, Equatable {
     var accumulate = true
     var icicles = true
     private var automaticPlowingOverride: Bool?
+    private var plowDestroysDecorationsOverride: Bool?
     var layer: SnowLayer = .behindWindows
     var idleSeconds = 0
     var onlyWhenIdle = false
@@ -245,6 +239,15 @@ struct SnowSettings: Codable, Equatable {
     var automaticPlowing: Bool {
         get { automaticPlowingOverride ?? true }
         set { automaticPlowingOverride = newValue ? nil : false }
+    }
+
+    var plowDestroysDecorations: Bool {
+        get { plowDestroysDecorationsOverride ?? false }
+        set { plowDestroysDecorationsOverride = newValue ? true : nil }
+    }
+
+    mutating func removeWreaths() {
+        ornaments.removeAll { $0.kind == .wreath }
     }
 }
 
@@ -265,6 +268,20 @@ struct SnowStorage: Codable {
     var scenes: [SavedScene] = []
     var originals: [UInt32: OriginalWallpaper] = [:]
     var welcomeSeen = false
+
+    mutating func removeWreaths() {
+        settings.removeWreaths()
+        for index in scenes.indices { scenes[index].settings.removeWreaths() }
+    }
+
+    mutating func migrateRetiredWallpapers() {
+        if Wallpaper.isRetired(settings.wallpaper) {
+            settings.wallpaper = nil
+        }
+        for index in scenes.indices where Wallpaper.isRetired(scenes[index].settings.wallpaper) {
+            scenes[index].settings.wallpaper = Wallpaper.cabin.id
+        }
+    }
 }
 
 @MainActor
@@ -302,8 +319,10 @@ final class SnowModel: ObservableObject {
 
     init(defaults: UserDefaults? = .standard) {
         self.defaults = defaults
-        let storage = defaults?.data(forKey: "snowglow-state-v1")
+        var storage = defaults?.data(forKey: "snowglow-state-v1")
             .flatMap { try? JSONDecoder().decode(SnowStorage.self, from: $0) } ?? SnowStorage()
+        storage.removeWreaths()
+        storage.migrateRetiredWallpapers()
         settings = storage.settings
         scenes = storage.scenes
         originals = storage.originals
@@ -338,11 +357,13 @@ final class SnowModel: ObservableObject {
         var ornament = Ornament(kind: kind, display: screen?.snowScreenID ?? 0,
                                 x: 0.77 - offset, y: 0.29 + offset)
         if kind == .calendar { ornament.y = 0.42 }
+        if kind == .snowman { ornament.snowmanFollowsGround = true }
         ornament.anchor = anchor
         add(ornament)
     }
 
     func add(_ ornament: Ornament) {
+        guard ornament.kind != .wreath else { return }
         settings.ornamentsVisible = true
         settings.ornaments.append(ornament)
         selectedOrnament = ornament.id
@@ -368,8 +389,12 @@ final class SnowModel: ObservableObject {
     }
 
     func remove(_ id: UUID) {
-        settings.ornaments.removeAll { $0.id == id }
-        if selectedOrnament == id { selectedOrnament = settings.ornaments.first?.id }
+        remove([id])
+    }
+
+    func remove(_ ids: Set<UUID>) {
+        settings.ornaments.removeAll { ids.contains($0.id) }
+        if let selectedOrnament, ids.contains(selectedOrnament) { self.selectedOrnament = settings.ornaments.first?.id }
     }
 
     func openDoor(_ day: Int, in id: UUID, now: Date = Date()) {
@@ -413,10 +438,13 @@ final class SnowModel: ObservableObject {
 
     func restoreScene(_ scene: SavedScene) {
         let currentWallpaper = settings.wallpaper
-        settings = scene.settings
-        settings.wallpaper = currentWallpaper
-        if scene.settings.wallpaper != currentWallpaper {
-            if let index = scene.settings.wallpaper {
+        let sceneWallpaper = Wallpaper.isRetired(scene.settings.wallpaper) ? Wallpaper.cabin.id : scene.settings.wallpaper
+        var restored = scene.settings
+        restored.removeWreaths()
+        restored.wallpaper = currentWallpaper
+        settings = restored
+        if sceneWallpaper != currentWallpaper {
+            if let index = sceneWallpaper {
                 wallpaperService?.apply(index)
             } else {
                 wallpaperService?.restore()
