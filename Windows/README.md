@@ -4,7 +4,7 @@ Snowglow 的 Windows 桌面雪景版。设置沿用 macOS 版的降雪、装饰�
 
 ## 下载与启动
 
-在 [GitHub Releases](https://github.com/donghuaxiong/winter-snow/releases/latest) 下载对应芯片的 EXE。ARM 电脑和 Apple 芯片 Mac 上的 Parallels Windows 11 选 ARM64，Intel 或 AMD 电脑选 x64。下载后双击运行，程序已带上运行时。
+从最新发行版下载对应芯片的 EXE。ARM 电脑和 Apple 芯片 Mac 上的 Parallels Windows 11 选 ARM64，Intel 或 AMD 电脑选 x64。下载后双击运行，程序已带上运行时。[Gitee 下载（国内）](https://gitee.com/dong-huaxiong/winter-snow/releases) · [GitHub 下载](https://github.com/donghuaxiong/winter-snow/releases/latest)
 
 首次打开会显示设置。关闭设置窗口后可从任务栏通知区域再次打开，也可从同一菜单退出程序。Windows 收起托盘图标时，点通知区域旁的向上箭头查看。
 

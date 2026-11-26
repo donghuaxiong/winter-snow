@@ -2,11 +2,13 @@
 
 让雪落在桌面、窗沿和屏幕底边。为雪人换装，挂一串彩灯，或挑一张圣诞夜壁纸。
 
-[下载最新版](https://github.com/donghuaxiong/winter-snow/releases/latest) · [使用说明](#安装与启动) · [从源码构建](#从源码构建)
+[Gitee 下载（国内）](https://gitee.com/dong-huaxiong/winter-snow/releases) · [GitHub 下载](https://github.com/donghuaxiong/winter-snow/releases/latest) · [使用说明](#安装与启动) · [从源码构建](#从源码构建)
 
 ![Snowglow 的雪夜木屋壁纸。暖色窗灯照亮雪地，远处是深蓝色的雪山。](Resources/WinterCabin.jpg)
 
 ## 下载
+
+国内用户可以从 [Gitee 发行版](https://gitee.com/dong-huaxiong/winter-snow/releases) 下载。打开最新版，按下表选择相同名称的附件。表格中的链接可从 GitHub 直接下载。
 
 | 你的电脑 | 下载文件 |
 | --- | --- |
@@ -15,7 +17,7 @@
 | Intel / AMD 电脑，Windows 11 | [Windows x64 EXE](https://github.com/donghuaxiong/winter-snow/releases/latest/download/Snowglow-Windows-x64.exe) |
 | ARM 电脑或 Apple 芯片 Mac 上的 Parallels Windows 11 | [Windows ARM64 EXE](https://github.com/donghuaxiong/winter-snow/releases/latest/download/Snowglow-Windows-ARM64.exe) |
 
-Mac 用户选通用版即可。发布页提供 [SHA-256 校验文件](https://github.com/donghuaxiong/winter-snow/releases/latest/download/SHA256SUMS.txt)。
+Mac 用户选通用版即可。Gitee 和 GitHub 的发行版均提供 `SHA256SUMS.txt`。[GitHub 校验文件直链](https://github.com/donghuaxiong/winter-snow/releases/latest/download/SHA256SUMS.txt)
 
 ## 安装与启动
 
