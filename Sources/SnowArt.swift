@@ -45,11 +45,43 @@ enum SnowArt {
         for grain in grains {
             let radius = grain.radius
             let point = grain.position
+            if grain.chunkRadius != nil && radius > 2.5 {
+                drawFracture(at: point, radius: radius, rotation: grain.angle, ink: ink)
+                continue
+            }
             ink.oval(CGRect(x: point.x - radius, y: point.y - radius * 0.62, width: radius * 2, height: radius * 1.38),
                     0xc2d5ec, alpha: 0.92)
             ink.oval(CGRect(x: point.x - radius * 0.9, y: point.y - radius * 0.68, width: radius * 1.62, height: radius),
                     0xf9fcff, alpha: 0.94)
         }
+    }
+
+    private static let fractureOutline: CGPath = {
+        let points = [p(-0.94, -0.18), p(-0.53, -0.72), p(0.06, -0.88), p(0.81, -0.47),
+                      p(0.97, 0.09), p(0.49, 0.63), p(-0.09, 0.81), p(-0.77, 0.53)]
+        let path = CGMutablePath()
+        let last = points[points.count - 1]
+        path.move(to: p((last.x + points[0].x) / 2, (last.y + points[0].y) / 2))
+        for index in points.indices {
+            let a = points[index], b = points[(index + 1) % points.count]
+            path.addQuadCurve(to: p((a.x + b.x) / 2, (a.y + b.y) / 2), control: a)
+        }
+        path.closeSubpath()
+        return path
+    }()
+
+    private static func drawFracture(at point: CGPoint, radius: CGFloat, rotation: CGFloat, ink: Ink) {
+        let ctx = ink.ctx
+        ctx.saveGState()
+        ctx.translateBy(x: point.x, y: point.y)
+        ctx.scaleBy(x: radius, y: radius)
+        var transform = CGAffineTransform(rotationAngle: rotation)
+        ctx.addPath(fractureOutline.copy(using: &transform) ?? fractureOutline)
+        ctx.clip()
+        ink.gradient(CGRect(x: -1.1, y: -1.1, width: 2.2, height: 2.2), [0xfbfefe, 0xebf5ff, 0xa7bccf])
+        ink.circle(-0.32, -0.33, 0.26, 0xffffff, alpha: 0.57)
+        ink.circle(0.30, 0.25, 0.18, 0xc2d6e9, alpha: 0.58)
+        ctx.restoreGState()
     }
 
     static func drift(_ drift: SnowDrift, on surface: SnowSurface, icicles: Bool, ink: Ink) {

@@ -19,10 +19,10 @@ internal sealed class DesktopController : IDisposable
         public readonly WeatherVisual Visual;
         public readonly Overlay Layer;
 
-        public Display(MonitorInfo monitor, bool showFlakes)
+        public Display(MonitorInfo monitor)
         {
             Scene = new SnowScene(monitor);
-            Visual = new WeatherVisual(Scene) { ShowFlakes = showFlakes };
+            Visual = new WeatherVisual(Scene);
             Layer = new Overlay(Visual, passthrough: true);
             Layer.Place(monitor.Pixels);
         }
@@ -70,7 +70,6 @@ internal sealed class DesktopController : IDisposable
     private uint? previewStamp;
     private bool preview;
     private bool idle;
-    private bool snowing;
     private Action? endDecorationEditing;
     private DecorationDrag? decorationDrag;
     private readonly Dictionary<Guid, DecorationHandle> decorationHandles = [];
@@ -280,7 +279,7 @@ internal sealed class DesktopController : IDisposable
             completed?.Invoke();
         }
         idle = Options.IdleSeconds > 0 && input is { } last && NativeDesktop.IdleMilliseconds(last) >= Options.IdleSeconds * 1000u;
-        snowing = preview || Options.Snow && (!Options.OnlyIdle || idle);
+        bool snowing = preview || Options.Snow && (!Options.OnlyIdle || idle);
         UpdatePlacement(cursor, pressed);
         if (endDecorationEditing is not null && NativeDesktop.EscapeDown) StopEditingDecorations();
         if (decorationDrag is not null)
@@ -302,7 +301,7 @@ internal sealed class DesktopController : IDisposable
             desktopWindows = NativeDesktop.Windows(endDecorationEditing is not null || Options.Placement?.Window is not null ||
                 Options.Decorations.Any(d => d.Window is not null));
             foreach (Display display in displays.Values)
-                display.Scene.SetDesktop(desktopWindows, now, (float)(now - lastScan), snowing && Options.Accumulation);
+                display.Scene.SetDesktop(desktopWindows, now, (float)(now - lastScan), Options.Accumulation);
             PositionAnchoredSnowman();
             lastScan = now;
         }
@@ -318,15 +317,15 @@ internal sealed class DesktopController : IDisposable
         {
             SnowScene scene = display.Scene;
             var monitor = scene.Monitor;
+            if (!snowing && Options.Snow) scene.StopAirborneFlakes();
             scene.SettingsCover = cover is { } rect ? monitor.ToLocal(rect) : null;
-            UpdateFlakeCovers(scene);
             UpdateDecorations(scene);
             bool sweeping = haveCursor && !pressed && monitor.Pixels.Contains(cursor) && monitor.Pixels.Contains(lastCursor);
             var movingPlow = scene.Plow;
             scene.Step(delta, Options, snowing, reducedMotion, sweeping ? monitor.ToLocal(lastCursor) : null,
                 sweeping ? monitor.ToLocal(cursor) : null);
+            UpdateFlakeCovers(scene);
             if (Options.PlowCollision && movingPlow is not null) CheckDecorationCollisions(scene, movingPlow);
-            display.Visual.ShowFlakes = snowing;
             display.Visual.Dim = snowing && Options.IdleDim && (preview || idle);
             display.Visual.Time = reducedMotion ? 0 : now;
             display.Visual.InvalidateVisual();
@@ -428,7 +427,7 @@ internal sealed class DesktopController : IDisposable
     private void UpdateFlakeCovers(SnowScene scene)
     {
         scene.FlakeCovers.Clear();
-        if (!snowing || preview || Options.Layer == SnowLayer.InFront) return;
+        if (scene.Flakes.Count == 0 || preview || Options.Layer == SnowLayer.InFront) return;
         nint foreground = Options.Layer == SnowLayer.BehindFrontWindow ? NativeDesktop.ForegroundWindow : 0;
         var viewport = new Box(0, 0, scene.Monitor.Width, scene.Monitor.Height);
         foreach (WindowSample window in desktopWindows)
@@ -568,7 +567,7 @@ internal sealed class DesktopController : IDisposable
         }
         foreach (MonitorInfo monitor in live)
             if (!displays.ContainsKey(monitor.Name))
-                displays.Add(monitor.Name, new Display(monitor, Options.Snow));
+                displays.Add(monitor.Name, new Display(monitor));
 
         RestoreSnowman();
         lastScan = -1;

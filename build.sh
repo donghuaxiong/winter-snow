@@ -37,6 +37,8 @@ for side in 16 32 128 256 512; do
 done
 iconutil -c icns "$build/Snowglow.iconset" -o "$app/Contents/Resources/Snowglow.icns"
 cp Resources/WinterCabin.jpg Resources/LockSnow.mov Resources/LockSnow.png "$app/Contents/Resources/"
+cp Resources/RolledSnowballProps.png Resources/RolledSnowballs.png "$app/Contents/Resources/"
+cp Resources/FestiveFlightReindeer.png Resources/FestiveFlightSleigh.png "$app/Contents/Resources/"
 cp Resources/Wallpapers/*.jpg "$app/Contents/Resources/Wallpapers/"
 rm -f "$app/Contents/Resources/SettingsIcons/"*.png(N)
 cp Resources/SettingsIcons/*.png "$app/Contents/Resources/SettingsIcons/"

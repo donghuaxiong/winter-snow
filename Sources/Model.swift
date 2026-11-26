@@ -191,6 +191,7 @@ struct Ornament: Codable, Identifiable, Equatable {
     var snowballs = 3
     var snowmanFollowsGround: Bool?
     var usesDisplayCoordinates: Bool?
+    var lightStrand: LightStrand?
     var extras = true
     private var snowmanCostume: SnowmanCostume?
     var calendarStart = Date()
@@ -205,6 +206,7 @@ struct Ornament: Codable, Identifiable, Equatable {
     }
 
     var colors: [UInt32] { palette == .custom ? [customColor] : palette.colors }
+    var title: String { lightStrand == nil ? kind.title : "自由彩灯" }
 
     var costume: SnowmanCostume {
         get { snowmanCostume ?? SnowmanCostume(scarf: extras ? .palette : .none, arms: extras) }
@@ -224,7 +226,14 @@ struct SnowSettings: Codable, Equatable {
     var intensity = 0.45
     var speed = 0.55
     var wind = 0.12
+    private var crystalMixOverride: Double?
+    private var gustsOverride: Double?
+    private var avoidFullscreenOverride: Bool?
+    private var adaptivePowerOverride: Bool?
+    private var festiveVisitsOverride: Bool?
     var accumulate = true
+    private var rollSnowballsOverride: Bool?
+    private var automaticallyFinishSnowmanOverride: Bool?
     var icicles = true
     private var automaticPlowingOverride: Bool?
     private var plowDestroysDecorationsOverride: Bool?
@@ -235,6 +244,41 @@ struct SnowSettings: Codable, Equatable {
     var ornaments: [Ornament] = []
     var ornamentsVisible = true
     var wallpaper: Int?
+
+    var crystalMix: Double {
+        get { crystalMixOverride ?? 0.37 }
+        set { crystalMixOverride = newValue }
+    }
+
+    var rollSnowballs: Bool {
+        get { rollSnowballsOverride ?? true }
+        set { rollSnowballsOverride = newValue ? nil : false }
+    }
+
+    var automaticallyFinishSnowman: Bool {
+        get { automaticallyFinishSnowmanOverride ?? true }
+        set { automaticallyFinishSnowmanOverride = newValue ? nil : false }
+    }
+
+    var gusts: Double {
+        get { gustsOverride ?? 0.56 }
+        set { gustsOverride = newValue }
+    }
+
+    var avoidFullscreen: Bool {
+        get { avoidFullscreenOverride ?? true }
+        set { avoidFullscreenOverride = newValue }
+    }
+
+    var adaptivePower: Bool {
+        get { adaptivePowerOverride ?? true }
+        set { adaptivePowerOverride = newValue }
+    }
+
+    var festiveVisits: Bool {
+        get { festiveVisitsOverride ?? true }
+        set { festiveVisitsOverride = newValue }
+    }
 
     var automaticPlowing: Bool {
         get { automaticPlowingOverride ?? true }
@@ -308,6 +352,8 @@ final class SnowModel: ObservableObject {
     var toggleLockSnow: (() -> Void)?
     var startPicking: (() -> Void)?
     var startSnowman: (() -> Void)?
+    var hangLights: ((UUID?) -> Void)?
+    var sendSleigh: (() -> Void)?
     var cancelSnowman: (() -> Void)?
     var assembleSnowman: (() -> Void)?
     var showWardrobe: ((UUID, CGRect?) -> Void)?

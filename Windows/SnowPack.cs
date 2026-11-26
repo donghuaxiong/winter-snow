@@ -8,6 +8,7 @@ internal sealed class SnowPack(float width, bool floor)
     private const float Spacing = 6;
     private readonly float depth = floor ? 25 : 14;
     private float[] heights = new float[CountFor(width)];
+    private float nextLeftSpill, nextRightSpill;
 
     public float Width { get; private set; } = width;
     public int Version { get; private set; }
@@ -91,6 +92,54 @@ internal sealed class SnowPack(float width, bool floor)
         return mass;
     }
 
+    public float SpillFromCorner(bool left, float now)
+    {
+        if (floor || heights.Length < 5 || now < (left ? nextLeftSpill : nextRightSpill)) return 0;
+        int outer = left ? 0 : heights.Length - 1;
+        int inward = left ? 1 : -1;
+        float edge = heights[outer];
+        float shoulder = heights[outer + inward] * .62f + heights[outer + inward * 2] * .38f;
+        if (edge < depth * .33f || shoulder < depth * .56f || edge * .38f + shoulder * .62f < depth * .52f) return 0;
+
+        float mass = Slice(outer, .42f) + Slice(outer + inward, .28f) + Slice(outer + inward * 2, .15f);
+        float cooldown = 3.4f + (Width % 59) / 36f + (left ? 0 : .45f);
+        if (left) nextLeftSpill = now + cooldown;
+        else nextRightSpill = now + cooldown;
+        Version++;
+        return mass;
+
+        float Slice(int index, float portion)
+        {
+            float amount = Math.Min(heights[index] * portion, Math.Max(0, heights[index] - depth * .27f));
+            heights[index] -= amount;
+            return amount;
+        }
+    }
+
+    public void DepositClump(float x, float mass)
+    {
+        int center = Math.Clamp((int)(x / Spacing), 0, heights.Length - 1);
+        int first = Math.Max(0, center - 2), end = Math.Min(heights.Length - 1, center + 2);
+        float weights = 0;
+        for (int i = first; i <= end; i++) weights += 3 - Math.Abs(i - center);
+        float remaining = mass;
+        for (int i = first; i <= end; i++)
+            remaining -= Place(i, mass * (3 - Math.Abs(i - center)) / weights);
+        for (int offset = 0; offset < heights.Length && remaining > .001f; offset++)
+        {
+            if (center - offset >= 0) remaining -= Place(center - offset, remaining);
+            if (offset > 0 && center + offset < heights.Length) remaining -= Place(center + offset, remaining);
+        }
+        Version++;
+
+        float Place(int index, float amount)
+        {
+            float room = Math.Min(amount, Math.Max(0, depth - heights[index]));
+            heights[index] += room;
+            return room;
+        }
+    }
+
     public void Settle()
     {
         float left = heights[0];
@@ -114,6 +163,7 @@ internal sealed class SnowPack(float width, bool floor)
     public void Clear()
     {
         Array.Clear(heights);
+        nextLeftSpill = nextRightSpill = 0;
         Version++;
     }
 }
@@ -127,6 +177,7 @@ internal sealed class Shelf(Box frame, bool floor)
     public float Radius;
     public float LastVelocity;
     public double LastShake = -1;
+    public bool LeftOverflow, RightOverflow;
 
     public bool Supports(float x) => x >= Frame.Left && x <= Frame.Right && Visible.Exists(span => span.Contains(x));
 
@@ -136,6 +187,17 @@ internal sealed class Shelf(Box frame, bool floor)
         if (distance >= Radius) return Frame.Top;
         float rim = Radius - distance;
         return Frame.Top + Radius - MathF.Sqrt(Math.Max(0, Radius * Radius - rim * rim));
+    }
+
+    public Box? OverflowRoute(bool left, Box viewport, float floor)
+    {
+        if (IsFloor || Radius <= 0 || Frame.Top + Radius + 7 >= floor) return null;
+        float edge = left ? Frame.Left : Frame.Right;
+        float inside = edge + (left ? 1 : -1) * Math.Max(20, Radius + 4);
+        float outside = edge + (left ? -6 : 6);
+        if (outside < viewport.Left || outside >= viewport.Right || !Visible.Exists(span => span.Contains(edge) && span.Contains(inside)))
+            return null;
+        return new Box(Math.Min(inside, outside), Frame.Top - 5, Math.Max(inside, outside), Frame.Top + Radius + 7);
     }
 
     public static List<Span> Exposed(Box frame, Box viewport, List<Box> nearer)

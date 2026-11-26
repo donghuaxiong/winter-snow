@@ -4,6 +4,8 @@ final class WindowSnowpack {
     private var drifts: [UInt32: SnowDrift] = [:]
     private var lastSettle: CGFloat?
 
+    var isEmpty: Bool { drifts.isEmpty }
+
     subscript(id: UInt32) -> SnowDrift? {
         get { drifts[id] }
         set { drifts[id] = newValue }
@@ -31,6 +33,8 @@ struct SnowDrift {
     private(set) var width: CGFloat
     private(set) var heights: [CGFloat]
     private(set) var revision: UInt64 = 0
+    private var nextLeftSpill: CGFloat = -.infinity
+    private var nextRightSpill: CGFloat = -.infinity
 
     init(width: CGFloat, floor: Bool, seed: UInt64, maximumDepth: CGFloat? = nil) {
         self.width = width
@@ -142,9 +146,32 @@ struct SnowDrift {
 
     func xAt(_ index: Int) -> CGFloat { min(width, (CGFloat(index) + 0.5) * Self.spacing) }
 
-    mutating func dislodge(at index: Int, pressure: CGFloat) -> CGFloat {
+    mutating func spillFromCorner(left: Bool, at time: CGFloat) -> CGFloat {
+        guard !isFloor, heights.count >= 5, time >= (left ? nextLeftSpill : nextRightSpill) else { return 0 }
+        let outer = left ? 0 : heights.count - 1
+        let inward = left ? 1 : -1
+        let edge = heights[outer]
+        let shoulder = heights[outer + inward] * 0.62 + heights[outer + inward * 2] * 0.38
+        guard edge >= maximumDepth * 0.33, shoulder >= maximumDepth * 0.56,
+              edge * 0.38 + shoulder * 0.62 >= maximumDepth * 0.52 else { return 0 }
+
+        var mass: CGFloat = 0
+        for (offset, fraction) in [CGFloat(0.42), 0.28, 0.15].enumerated() {
+            let index = outer + inward * offset
+            let removed = min(heights[index] * fraction, max(0, heights[index] - maximumDepth * 0.27))
+            heights[index] -= removed
+            mass += removed
+        }
+        let cooldown = 3.4 + CGFloat(seed % 11) * 0.16 + (left ? 0 : 0.45)
+        if left { nextLeftSpill = time + cooldown }
+        else { nextRightSpill = time + cooldown }
+        revision &+= 1
+        return mass
+    }
+
+    mutating func dislodge(at index: Int, pressure: CGFloat, limit: CGFloat = .infinity) -> CGFloat {
         guard pressure > 0 else { return 0 }
-        let removed = min(heights[index] * 0.62, 2.9) * pressure
+        let removed = min(limit, min(heights[index] * 0.62, 2.9) * pressure)
         heights[index] -= removed
         if removed > 0 { revision &+= 1 }
         return removed

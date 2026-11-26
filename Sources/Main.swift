@@ -135,10 +135,7 @@ final class SnowAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         let wallpaperService = WallpaperService(model: model)
         model.wallpaperService = wallpaperService
         let engine = DesktopEngine(model: model)
-        engine.studioFrame = { [weak self] in
-            guard let studio = self?.studio, studio.isVisible, !studio.isMiniaturized else { return nil }
-            return studio.frame
-        }
+        engine.studioWindow = { [weak self] in self?.studio }
         self.engine = engine
         model.showStudio = { [weak self] in self?.showStudio() }
         model.hideStudio = { [weak self] in self?.studio?.orderOut(nil) }
@@ -152,6 +149,8 @@ final class SnowAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
             self?.wardrobe?.orderOut(nil)
             engine?.startSnowman()
         }
+        model.hangLights = { [weak engine] id in engine?.beginHangingLights(id) }
+        model.sendSleigh = { [weak engine] in engine?.sendSleigh() }
         model.cancelSnowman = { [weak engine] in engine?.cancelSnowman(reopen: true) }
         model.assembleSnowman = { [weak engine] in engine?.assembleSnowman() }
         model.showWardrobe = { [weak self] id, frame in self?.showWardrobe(id: id, beside: frame) }
@@ -327,6 +326,17 @@ final class SnowAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         } else {
             menu.addItem(item("堆雪人…", #selector(startSnowman)))
         }
+        let rollSnow = item("鼠标搓雪球", #selector(toggleRollSnow))
+        rollSnow.state = model.settings.rollSnowballs ? .on : .off
+        menu.addItem(rollSnow)
+        let finishSnowman = item("叠满三颗自动成型", #selector(toggleAutomaticSnowman))
+        finishSnowman.state = model.settings.automaticallyFinishSnowman ? .on : .off
+        menu.addItem(finishSnowman)
+        if engine?.hasRolledSnowman == true {
+            menu.addItem(item("堆成雪人", #selector(buildRolledSnowman)))
+        }
+        menu.addItem(item("自由挂彩灯…", #selector(hangLights)))
+        menu.addItem(item("让雪橇出发", #selector(sendSleigh)))
         if !model.settings.ornaments.isEmpty {
             menu.addItem(.separator())
             menu.addItem(item(model.settings.ornamentsVisible ? "收起装饰" : "恢复装饰", #selector(toggleDecorations)))
@@ -366,6 +376,11 @@ final class SnowAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     }
     @objc private func applyCabin() { model.applyCabinScene() }
     @objc private func startSnowman() { model.startSnowman?() }
+    @objc private func toggleRollSnow() { model.settings.rollSnowballs.toggle() }
+    @objc private func toggleAutomaticSnowman() { model.settings.automaticallyFinishSnowman.toggle() }
+    @objc private func buildRolledSnowman() { engine?.finishRolledSnowman() }
+    @objc private func hangLights() { model.hangLights?(nil) }
+    @objc private func sendSleigh() { model.sendSleigh?() }
     @objc private func cancelSnowman() { model.cancelSnowman?() }
     @objc private func assembleSnowman() { model.assembleSnowman?() }
     @objc private func toggleDecorations() { model.settings.ornamentsVisible.toggle() }
@@ -383,6 +398,15 @@ private enum SelfTest {
         let settings = SnowSettings()
         checkWindowSnow(in: region, settings: settings)
         checkWindowSnowCorners()
+        checkNaturalWindowOverflow(in: region)
+        checkSnowPause(in: region)
+        checkPausedSnowPlay(in: region)
+        checkDirectSnowRolling(in: region)
+        checkRolledSnowman(in: region)
+        checkFreeSnowPlay(in: region)
+        checkSnowballThrows(in: region)
+        checkSnowballLedgeFalls(in: region)
+        checkFestiveEffects(in: region)
         checkStageAndDock(in: region)
         checkSnowSweep(in: region)
         checkCanvasDamage()
@@ -448,7 +472,7 @@ private enum SelfTest {
         let screens = NSScreen.screens
         let visible = DesktopWindow.onscreen(primaryTop: screens.first?.frame.maxY ?? 0,
                                            ignoring: ProcessInfo.processInfo.processIdentifier)
-        print("Passed: rounded window snow, drag and display handoff, falling window snow, cursor displacement and conserved floor deposition, Stage Manager geometry, Dock taper and landing, two plow passes with redeposition, snowball assembly and rebuilding, wardrobe placement, decoration placement and plow contact, partial repaint, calendar, scene persistence, and \(Wallpaper.all.count) wallpapers with legacy selection migration.")
+        print("Passed: window snow, natural overflow, pause and resume, Dock and Stage Manager geometry, plow cycle, preset and free-form snowmen, snowball growth, throws, window-to-window falls and floor impacts, free-hanging lights, fullscreen and power policy, gusts, sleigh gifts, tree branch snow, partial repaint, calendar, scene persistence, and \(Wallpaper.all.count) wallpapers.")
         print("Live WindowServer: \(screens.count) display(s), \(visible.count) eligible window(s).")
     }
 
@@ -531,6 +555,612 @@ private enum SelfTest {
         pending.resolveFallingWindow(12, didDisappear: true)
         for _ in 0..<40 { pending.stepFallingSnow(delta: delta, reduced: true) }
         precondition(!pending.fallingSnowAnimating && abs(pending.drift(on: .floor)!.heights.reduce(0, +) - detachedMass) < 0.01)
+    }
+
+    private static func checkNaturalWindowOverflow(in region: CGRect) {
+        let rect = CGRect(x: 180, y: 110, width: 360, height: 280)
+        let upper = SnowSurface(id: .window(21), rect: rect, visible: [180...540], floor: false, cornerRadius: 18)
+        let lower = SnowSurface(id: .window(22), rect: CGRect(x: 65, y: 320, width: 390, height: 190),
+                                visible: [65...455], floor: false, cornerRadius: 18)
+        let dock = SnowSurface(id: .dock, rect: CGRect(x: 65, y: 535, width: 390, height: 60),
+                               visible: [65...455], floor: false, cornerRadius: 20)
+        let floor = SnowSurface(id: .floor, rect: CGRect(x: 0, y: region.maxY, width: region.width, height: 1),
+                                visible: [0...region.width], floor: true)
+        let id: UInt32 = 21
+        var thick = SnowDrift(width: rect.width, floor: false, seed: 70)
+        thick.depositImpact(at: 3, mass: 43, width: 9)
+        var thin = SnowDrift(width: rect.width, floor: false, seed: 70)
+        thin.land(at: 9, mass: 6)
+        precondition(thin.spillFromCorner(left: true, at: 10) == 0)
+        var timed = thick
+        let mass = timed.spillFromCorner(left: true, at: 10)
+        precondition(mass > 0 && timed.heights[0] > 0 && timed.heights[4] == thick.heights[4])
+        precondition(abs(thick.heights.reduce(0, +) - timed.heights.reduce(0, +) - mass) < 0.001)
+        timed.depositImpact(at: 3, mass: 43, width: 9)
+        precondition(timed.spillFromCorner(left: true, at: 11) == 0)
+        precondition(timed.spillFromCorner(left: true, at: 16) > 0)
+
+        let masked = SnowSurface(id: upper.id, rect: rect, visible: [186...540], floor: false, cornerRadius: 18)
+        let nearCover = CGRect(x: 170, y: 117, width: 24, height: 80)
+        let covered = SnowSurface(id: upper.id, rect: rect, visible: upper.visible, floor: false,
+                                  occluders: [nearCover], cornerRadius: 18)
+        precondition(masked.overflowCorner(left: true, on: floor.rect) == nil)
+        precondition(covered.overflowCorner(left: true, on: floor.rect) == nil)
+
+        var settings = SnowSettings()
+        settings.intensity = 0
+        settings.automaticPlowing = false
+        let quietFlake = Flake(x: 0, y: 0, radius: 1, speed: 0, phase: 0, depth: 0)
+        for support in [lower, dock, floor] {
+            let shared = WindowSnowpack()
+            shared[id] = thick
+            var scene = DisplayScene(id: 9, windowSnow: shared)
+            scene.flakes = Array(repeating: quietFlake, count: 32)
+            scene.setSurfaces(support.floor ? [upper, floor] : [upper, support, floor])
+            scene.step(size: region.size, delta: 0.18, time: 10, settings: settings, reduced: false)
+            precondition(scene.fallingSnow.count == 1 && scene.fallingSnow[0].followsCorner)
+            let clump = scene.fallingSnow[0]
+            let moved = SnowSurface(id: upper.id, rect: rect.offsetBy(dx: 14, dy: 0),
+                                    visible: [194...554], floor: false, cornerRadius: 18)
+            scene.setSurfaces(support.floor ? [moved, floor] : [moved, support, floor])
+            scene.stepFallingSnow(delta: 1.0 / 60, reduced: false)
+            precondition(scene.fallingSnow[0].center.x > clump.center.x + 10, "Sliding snow follows the moving corner")
+            for _ in 0..<120 { scene.stepFallingSnow(delta: 1.0 / 60, reduced: false) }
+            precondition(scene.fallingSnow.isEmpty && shared[id]!.heights[0] > 0)
+            precondition(abs(scene.drift(on: support.id)!.heights.reduce(0, +) - clump.mass) < 0.001)
+            if !support.floor { precondition(scene.drift(on: .floor) == nil) }
+        }
+    }
+
+    private static func checkSnowPause(in region: CGRect) {
+        let sill = SnowSurface(id: .window(17), rect: CGRect(x: 100, y: 220, width: 300, height: 200),
+                               visible: [100...400], floor: false, cornerRadius: 18)
+        let floor = SnowSurface(id: .floor, rect: CGRect(x: 0, y: region.maxY, width: region.width, height: 1),
+                                visible: [0...region.width], floor: true)
+        let shared = WindowSnowpack()
+        var bank = SnowDrift(width: sill.rect.width, floor: false, seed: 91)
+        bank.depositImpact(at: 90, mass: 25, width: 14)
+        shared[17] = bank
+        var scene = DisplayScene(id: 23, windowSnow: shared)
+        scene.setSurfaces([sill, floor])
+        var settings = SnowSettings()
+        settings.wind = 0
+        settings.automaticPlowing = false
+        let delta: CGFloat = 1.0 / 30
+        scene.step(size: region.size, delta: 0, time: 0, settings: settings, reduced: false)
+        scene.flakes = [Flake(x: 500, y: -30, radius: 2, speed: 80, phase: 0, depth: 1),
+                        Flake(x: 550, y: 95, radius: 2, speed: 80, phase: 0, depth: 1),
+                        Flake(x: 600, y: region.maxY - 1, radius: 2, speed: 80, phase: 0, depth: 1)]
+        scene.step(size: region.size, delta: delta, time: delta, settings: settings, reduced: false, emitting: false)
+        precondition(scene.flakes.count == 1 && scene.flakes[0].y > 95, "Pause drains visible snow and discards queued flakes")
+        let floorMass = scene.drift(on: .floor)!.heights.reduce(0, +)
+        for frame in 2...260 {
+            scene.step(size: region.size, delta: delta, time: CGFloat(frame) * delta,
+                       settings: settings, reduced: false, emitting: false)
+        }
+        precondition(scene.flakes.isEmpty && scene.drift(on: .floor)!.heights.reduce(0, +) > floorMass)
+        precondition(abs(shared[17]!.heights.reduce(0, +) - bank.heights.reduce(0, +)) < 0.001)
+        scene.step(size: region.size, delta: 0.001, time: 9, settings: settings, reduced: false)
+        precondition(!scene.flakes.isEmpty && scene.flakes.allSatisfy { $0.y < 0 }, "Resumed flakes arrive from above")
+        scene.clearAccumulation()
+        precondition(scene.drift(on: .floor) == nil && shared.isEmpty)
+    }
+
+    private static func checkPausedSnowPlay(in region: CGRect) {
+        let window: SurfaceID = .window(54)
+        let sill = SnowSurface(id: window, rect: CGRect(x: 120, y: 210, width: 320, height: 170),
+                               visible: [120...440], floor: false, cornerRadius: 18)
+        let floor = SnowSurface(id: .floor, rect: CGRect(x: 0, y: region.maxY, width: region.width, height: 1),
+                                visible: [0...region.width], floor: true)
+        let shared = WindowSnowpack()
+        var bank = SnowDrift(width: sill.rect.width, floor: false, seed: 92)
+        bank.depositImpact(at: 97, mass: 2.4, width: 7)
+        bank.depositImpact(at: 193, mass: 32, width: 24)
+        shared[54] = bank
+        var scene = DisplayScene(id: 12, windowSnow: shared)
+        scene.setSurfaces([sill, floor])
+        var settings = SnowSettings()
+        settings.enabled = false
+        scene.step(size: region.size, delta: 1.0 / 60, time: 2, settings: settings, reduced: false, emitting: false)
+        var rolled = RolledSnow()
+        let point = p(217, 209)
+        rolled.take(at: point, time: 2, snow: &scene)
+        let mass = rolled.balls[0].mass
+        precondition(mass > 0 && mass < 1.4, "Thin retained snow can form a small ball")
+        rolled.release(at: 2.13)
+        precondition(rolled.held == nil && rolled.balls.count == 1)
+        precondition(abs(bank.heights.reduce(0, +) - shared[54]!.heights.reduce(0, +) - mass) < 0.001)
+        let y = sill.rect.minY - shared[54]!.height(at: 193)
+        precondition(scene.sweepSnow(from: p(302, y), to: p(330, y), delta: 1.0 / 60, reduced: false))
+        precondition(!scene.looseSnow.isEmpty && scene.flakes.isEmpty)
+
+        let blocker = CGRect(x: 200, y: 181, width: 42, height: 44)
+        scene.setSurfaces([SnowSurface(id: window, rect: sill.rect, visible: sill.visible, floor: false,
+                                      occluders: [blocker], cornerRadius: sill.cornerRadius), floor])
+        precondition(scene.harvestSnow(from: point, to: point) == 0)
+    }
+
+    private static func checkDirectSnowRolling(in region: CGRect) {
+        var settings = SnowSettings()
+        precondition(settings.rollSnowballs)
+        settings.rollSnowballs = false
+        precondition(!(try! JSONDecoder().decode(SnowSettings.self, from: JSONEncoder().encode(settings))).rollSnowballs)
+        settings.rollSnowballs = true
+        settings.enabled = false
+
+        let shelf = SnowSurface(id: .window(59), rect: CGRect(x: 120, y: 210, width: 400, height: 170),
+                                visible: [120...520], floor: false, cornerRadius: 18)
+        let floor = SnowSurface(id: .floor, rect: CGRect(x: 0, y: region.maxY, width: region.width, height: 1),
+                                visible: [0...region.width], floor: true)
+        let shared = WindowSnowpack()
+        let id: UInt32 = 59
+        var pack = SnowDrift(width: shelf.rect.width, floor: false, seed: 162)
+        for x in stride(from: 24, to: 285, by: 12) { pack.depositImpact(at: CGFloat(x), mass: 26, width: 20) }
+        shared[id] = pack
+        var scene = DisplayScene(id: 73, windowSnow: shared)
+        scene.setSurfaces([shelf, floor])
+        let point = p(204, 206)
+        let hit = scene.rollHandle(at: point)!
+        precondition(hit.contains(point) && hit.maxY <= shelf.rect.minY)
+        precondition(scene.rollHandle(at: p(204, 218)) == nil && scene.rollHandle(at: p(440, 206)) == nil)
+        scene.setSurfaces([SnowSurface(id: shelf.id, rect: shelf.rect, visible: shelf.visible, floor: false,
+                                      occluders: [CGRect(x: 195, y: 185, width: 20, height: 37)], cornerRadius: 18), floor])
+        precondition(scene.rollHandle(at: point) == nil)
+        scene.setSurfaces([shelf, floor])
+
+        var rolled = RolledSnow()
+        rolled.take(at: point, time: 1, snow: &scene)
+        for i in 1...8 { rolled.roll(to: p(point.x + CGFloat(i) * 13, 205), time: 1 + Double(i) * 0.035, snow: &scene) }
+        let grown = rolled.balls[0]
+        precondition(grown.mass > 6 && grown.rotation > 3)
+        precondition(scene.rollingContact(near: rolled.pointer).map { abs(grown.center.y + grown.radius - $0) < 9 } == true)
+        rolled.roll(to: p(445, 270), time: 1.34, snow: &scene)
+        rolled.release(at: 1.51)
+        var bounced = false
+        for _ in 0..<170 {
+            rolled.advance(1.0 / 60, size: region.size, snow: &scene, reduced: false)
+            bounced = bounced || (rolled.balls.first?.velocity.dy ?? 0) < 0
+        }
+        precondition(bounced && rolled.balls.count == 1 && !rolled.animating && scene.flakes.isEmpty)
+    }
+
+    private static func checkRolledSnowman(in region: CGRect) {
+        let sill = SnowSurface(id: .window(77), rect: CGRect(x: 100, y: 228, width: 600, height: 190),
+                               visible: [100...700], floor: false, cornerRadius: 18)
+        let floor = SnowSurface(id: .floor, rect: CGRect(x: 0, y: region.maxY, width: region.width, height: 1),
+                                visible: [0...region.width], floor: true)
+        let shared = WindowSnowpack()
+        var pack = SnowDrift(width: sill.rect.width, floor: false, seed: 27)
+        for x in stride(from: 15, through: 560, by: 10) { pack.depositImpact(at: CGFloat(x), mass: 22, width: 17) }
+        shared[77] = pack
+        var scene = DisplayScene(id: 80, windowSnow: shared)
+        scene.setSurfaces([sill, floor])
+        var rolled = RolledSnow()
+        for (index, strip) in [(135.0, 260.0), (355.0, 414.0), (520.0, 548.0)].enumerated() {
+            let time = Double(index) * 4
+            rolled.take(at: p(strip.0, 223), time: time, snow: &scene)
+            rolled.roll(to: p(strip.1, 223), time: time + 0.45, snow: &scene)
+            rolled.release(at: time + 0.62)
+            for _ in 0..<150 { rolled.advance(1.0 / 60, size: region.size, snow: &scene, reduced: false) }
+        }
+        precondition(rolled.balls.count == 3 && rolled.balls.allSatisfy { $0.rest != nil })
+        let base = rolled.balls[0], middle = rolled.balls[1], top = rolled.balls[2]
+        let grip = p(middle.center.x + 3, middle.center.y - 3)
+        rolled.take(at: grip, time: 13, snow: &scene)
+        rolled.roll(to: p(base.center.x + 3, base.center.y - base.radius - 6), time: 13.05, snow: &scene)
+        precondition(rolled.release(at: 13.05) == middle.id, "A quick, centered drop still snaps to the lower ball")
+        precondition(rolled.canFinishStack(containing: middle.id) && rolled.takeStack(containing: middle.id, minimum: 3) == nil)
+
+        let stackedMiddle = rolled.balls.first { $0.id == middle.id }!
+        rolled.take(at: top.center, time: 14, snow: &scene)
+        rolled.roll(to: p(stackedMiddle.center.x + 4, stackedMiddle.center.y - stackedMiddle.radius - 3), time: 14.04, snow: &scene)
+        precondition(rolled.release(at: 14.04) == top.id)
+        let ready = rolled.takeStack(containing: top.id, minimum: 3, automatic: true)
+        precondition(ready?.count == 3 && ready?.surface == sill.id && ready?.base.id == base.id && rolled.balls.isEmpty)
+    }
+
+    private static func snowPlayFixture(in region: CGRect) -> (DisplayScene, SnowSurface) {
+        let ledge = SnowSurface(id: .window(67), rect: CGRect(x: 24, y: region.maxY - 150, width: region.width - 48, height: 90),
+                                visible: [24...(region.maxX - 24)], floor: false)
+        let floor = SnowSurface(id: .floor, rect: CGRect(x: 0, y: region.maxY, width: region.width, height: 1),
+                                visible: [0...region.width], floor: true)
+        let store = WindowSnowpack()
+        var pack = SnowDrift(width: ledge.rect.width, floor: false, seed: 81)
+        for x in stride(from: CGFloat(0), to: ledge.rect.width, by: 6) {
+            pack.depositImpact(at: x, mass: 18, width: 15)
+        }
+        store[67] = pack
+        var scene = DisplayScene(id: 19, windowSnow: store)
+        scene.setSurfaces([ledge, floor])
+        return (scene, ledge)
+    }
+
+    private static func checkFreeSnowPlay(in region: CGRect) {
+        var (scene, ledge) = snowPlayFixture(in: region)
+        let height = ledge.rect.minY - 8
+        let initialMass = scene.drift(on: ledge.id)!.heights.reduce(0, +)
+        var growing = RolledSnow()
+        growing.take(at: p(45, height), time: 1, snow: &scene)
+        for i in 1...48 { growing.roll(to: p(45 + CGFloat(i) * 14.5, height), time: 1 + Double(i) * 0.026, snow: &scene) }
+        let firstPass = growing.balls[0].radius
+        precondition(firstPass > 48, "A normal pass over a deep layer can make a ball substantially bigger than the old limit")
+        growing.release(at: 2.6)
+        for _ in 0..<60 { growing.advance(1.0 / 60, size: region.size, snow: &scene, reduced: false) }
+        let big = growing.balls[0]
+        growing.take(at: big.center, time: 4, snow: &scene, preferred: big.id)
+        for i in 1...45 {
+            growing.roll(to: p(big.center.x - CGFloat(i) * 14.5, big.center.y),
+                         time: 4 + Double(i) * 0.035, snow: &scene)
+        }
+        let heavier = growing.balls[0]
+        let remainingMass = scene.drift(on: ledge.id)!.heights.reduce(0, +)
+        precondition(heavier.radius >= firstPass && abs(heavier.radius - RolledSnowball.maximumRadius) < 0.001)
+        precondition(abs(initialMass - remainingMass - heavier.mass) < 0.001)
+        growing.roll(to: p(168, big.center.y), time: 6, snow: &scene)
+        precondition(scene.drift(on: ledge.id)!.heights.reduce(0, +) == remainingMass)
+
+        (scene, ledge) = snowPlayFixture(in: region)
+        var rolled = RolledSnow()
+        let strips: [(CGFloat, CGFloat)] = [(48, 226), (333, 409), (478, 512), (602, 616), (688, 695)]
+        for (index, strip) in strips.enumerated() {
+            let time = Double(index) * 4
+            rolled.take(at: p(strip.0, height), time: time, snow: &scene)
+            rolled.roll(to: p(strip.1, height), time: time + 0.46, snow: &scene)
+            rolled.release(at: time + 0.62)
+            for _ in 0..<70 { rolled.advance(1.0 / 60, size: region.size, snow: &scene, reduced: false) }
+        }
+        let ids = rolled.balls.map(\.id)
+        precondition(ids.count == 5 && rolled.balls[0].radius > rolled.balls[1].radius * 1.3
+                     && rolled.balls[1].radius > rolled.balls[2].radius)
+        rolled.setFree(true, for: ids[0])
+
+        func stack(_ index: Int, on parent: Int, offset: CGFloat) {
+            let ball = rolled.ball(ids[index])!, lower = rolled.ball(ids[parent])!
+            let height = (ball.radius + lower.radius) * 0.92
+            let seat = p(lower.center.x + offset, lower.center.y - sqrt(height * height - offset * offset))
+            let start = Double(20 + index * 3)
+            rolled.take(at: ball.center, time: start, snow: &scene, preferred: ball.id)
+            rolled.roll(to: p(ball.center.x, ball.center.y - 39), time: start + 0.13, snow: &scene)
+            rolled.roll(to: seat, time: start + 0.36, snow: &scene)
+            precondition(rolled.release(at: start + 0.50, within: region.size) == ball.id, "An offset ball seats on its support")
+            precondition(rolled.ball(ball.id)?.rest == .ball(lower.id, offset: offset))
+        }
+        let baseRadius = rolled.balls[0].radius
+        stack(1, on: 0, offset: -floor(baseRadius * 0.59))
+        stack(2, on: 1, offset: 3)
+        precondition(rolled.takeStack(containing: ids[2], minimum: 3, automatic: true) == nil)
+        stack(3, on: 2, offset: 2)
+        stack(4, on: 0, offset: floor(baseRadius * 0.63))
+        let headBefore = rolled.ball(ids[2])!
+        let bodyBefore = rolled.ball(ids[1])!
+        for choice in [SnowballPropChoice.eyes, .carrot, .feltHat] { rolled.addProp(choice, to: ids[2], at: headBefore.center) }
+        for choice in [SnowballPropChoice.leftTwig, .rightTwig, .scarf, .coal] {
+            rolled.addProp(choice, to: ids[1], at: bodyBefore.center)
+        }
+        rolled.addProp(.woolHat, to: ids[2], at: headBefore.center)
+        precondition(rolled.ball(ids[2])!.props.map(\.kind) == [.eye, .eye, .carrot, .woolHat])
+        precondition(rolled.ball(ids[1])!.props.map(\.kind) == [.leftTwig, .rightTwig, .scarf, .coal])
+        precondition(!rolled.canFinishStack(containing: ids[2]) && rolled.balls.allSatisfy(\.freeStack))
+        let eye = rolled.ball(ids[2])!.props[0]
+        let eyeAnchor = p(headBefore.center.x - 3, headBefore.center.y - 5)
+        rolled.moveProp(eye.id, on: ids[2], to: eyeAnchor)
+        let movedEye = rolled.ball(ids[2])!.props[0]
+        precondition(hypot(movedEye.worldAnchor(on: headBefore).x - eyeAnchor.x,
+                           movedEye.worldAnchor(on: headBefore).y - eyeAnchor.y) < 0.001)
+        rolled.removeProp(eye.id, from: ids[2])
+        precondition(rolled.ball(ids[2])!.props.contains { $0.kind == .eye })
+
+        let foot = rolled.ball(ids[0])!
+        let originalTwigs = rolled.ball(ids[1])!.props
+        rolled.take(at: foot.center, time: 42, snow: &scene, preferred: foot.id)
+        rolled.roll(to: p(foot.center.x, foot.center.y - 65), time: 42.19, snow: &scene)
+        precondition(abs(rolled.ball(ids[2])!.center.y - headBefore.center.y + 65) < 0.001)
+        precondition(rolled.ball(ids[1])!.props.map(\.id) == originalTwigs.map(\.id))
+        rolled.release(at: 42.4)
+
+        var settings = SnowSettings()
+        precondition(settings.automaticallyFinishSnowman)
+        settings.automaticallyFinishSnowman = false
+        precondition(!(try! JSONDecoder().decode(SnowSettings.self, from: JSONEncoder().encode(settings))).automaticallyFinishSnowman)
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            precondition(RolledSnowArt.photosAvailable && SnowballPropArt.isAvailable)
+            let dressed = rolled.ball(ids[2])!
+            let carrot = dressed.props.first { $0.kind == .carrot }!
+            precondition(SnowballPropArt.hit(at: carrot.worldAnchor(on: dressed), on: dressed)?.id == carrot.id)
+            precondition(SnowballPropArt.bounds(of: dressed, including: CGRect(around: dressed.center, radius: dressed.radius))
+                .minY < dressed.center.y - dressed.radius)
+        }
+        let floor = scene.surfaces.first(where: \.floor)!
+        scene.setSurfaces([floor])
+        for _ in 0..<120 { rolled.advance(1.0 / 60, size: region.size, snow: &scene, reduced: false) }
+        var pass = PlowPass(direction: 1)
+        var pushedProps = false
+        for _ in 0..<480 {
+            let old = pass
+            pass.advance(1.0 / 60, width: floor.rect.width)
+            let contact = SnowplowContact(pass: pass, previous: old, floor: floor.rect)
+            if rolled.contactPlow(contact) {
+                pushedProps = rolled.plowed.contains { $0.ball.id == ids[1] && $0.ball.props.map(\.id) == originalTwigs.map(\.id) }
+            }
+            rolled.advancePlowed(1.0 / 60, contact: contact, floor: floor.rect, reduced: false)
+        }
+        precondition(pushedProps && rolled.isEmpty)
+    }
+
+    private static func checkSnowballThrows(in region: CGRect) {
+        func throwBall(from start: CGPoint, to end: CGPoint, in interval: Double, delay: Double = 0,
+                       reduced: Bool = false) -> (velocity: CGVector, broke: Bool, deposited: CGFloat) {
+            var (scene, ledge) = snowPlayFixture(in: region)
+            var rolled = RolledSnow()
+            let snow = ledge.rect.minY - 7
+            rolled.take(at: p(360, snow), time: 0, snow: &scene)
+            rolled.roll(to: p(428, snow), time: 0.4, snow: &scene)
+            rolled.release(at: 0.62)
+            for _ in 0..<80 { rolled.advance(1.0 / 60, size: region.size, snow: &scene, reduced: reduced) }
+            let center = rolled.balls[0].center
+            rolled.take(at: center, time: 3, snow: &scene)
+            rolled.roll(to: p(center.x, center.y - 55), time: 3.22, snow: &scene, within: region.size, reduced: reduced)
+            rolled.roll(to: start, time: 4, snow: &scene, within: region.size, reduced: reduced)
+            rolled.roll(to: end, time: 4 + interval, snow: &scene, within: region.size, reduced: reduced)
+            rolled.release(at: 4 + interval + delay, within: region.size)
+            let thrown = rolled.balls[0]
+            var fragments: CGFloat = 0
+            for _ in 0..<180 {
+                rolled.advance(1.0 / 60, size: region.size, snow: &scene, reduced: reduced)
+                if rolled.balls.isEmpty && fragments == 0 {
+                    fragments = scene.looseSnow.reduce(0) { $0 + $1.mass }
+                }
+                scene.stepFallingSnow(delta: 1.0 / 60, reduced: reduced)
+            }
+            let deposited = scene.drift(on: .floor)?.heights.reduce(0, +) ?? 0
+            if fragments > 0 {
+                precondition(abs(fragments - thrown.mass) < 0.001, "The impact redistributes all rolled snow into physical pieces")
+                precondition(abs(deposited - fragments) < 0.001 && scene.looseSnow.isEmpty, "Fragments settle all the way to the floor while snowfall is paused")
+            }
+            precondition(scene.flakes.isEmpty)
+            return (thrown.velocity, rolled.balls.isEmpty && fragments > 0, deposited)
+        }
+        let slow = throwBall(from: p(520, 135), to: p(583, 134), in: 0.35)
+        let fast = throwBall(from: p(520, 135), to: p(583, 134), in: 0.033)
+        let stopped = throwBall(from: p(520, 135), to: p(583, 134), in: 0.033, delay: 0.22)
+        precondition(fast.velocity.dx > slow.velocity.dx * 5 && !slow.broke && fast.broke && fast.deposited > 5)
+        precondition(stopped.velocity == .zero && !stopped.broke)
+        precondition(throwBall(from: p(250, 145), to: p(174, 142), in: 0.034, reduced: true).broke)
+        precondition(throwBall(from: p(310, 105), to: p(309, 53), in: 0.032).broke)
+        precondition(throwBall(from: p(782, 479), to: p(782, 541), in: 0.035).broke)
+    }
+
+    private static func checkSnowballLedgeFalls(in region: CGRect) {
+        let floor = SnowSurface(id: .floor,
+                                rect: CGRect(x: region.minX, y: region.maxY, width: region.width, height: 1),
+                                visible: [region.minX...region.maxX], floor: true)
+
+        func ledge(_ id: UInt32, at y: CGFloat, from left: CGFloat, to right: CGFloat,
+                   behind higher: [SnowSurface] = []) -> SnowSurface {
+            let frame = CGRect(x: left, y: y, width: right - left, height: 210)
+            let cover = higher.map(\.rect)
+            return SnowSurface(id: .window(id), rect: frame, visible: exposedEdge(frame, inside: region, blockedBy: cover),
+                               floor: false, occluders: cover, cornerRadius: 18)
+        }
+
+        func fixture(_ windows: [SnowSurface]) -> DisplayScene {
+            let pack = WindowSnowpack()
+            let upper = windows[0]
+            if case let .window(id) = upper.id {
+                var source = SnowDrift(width: upper.rect.width, floor: false, seed: 81)
+                for x in stride(from: CGFloat(7), to: source.width, by: 6) {
+                    source.depositImpact(at: x, mass: 20, width: 14)
+                }
+                pack[id] = source
+            }
+            var scene = DisplayScene(id: 83, windowSnow: pack)
+            scene.setSurfaces(windows + [floor])
+            return scene
+        }
+
+        let high = ledge(81, at: 118, from: 100, to: 290)
+        let middle = ledge(82, at: 247, from: 230, to: 557, behind: [high])
+        let low = ledge(83, at: 377, from: 470, to: 751, behind: [high, middle])
+        var scene = fixture([high, middle, low])
+        precondition(middle.visible == [290...557] && low.visible == [557...751])
+        let swept = scene.sweptLanding(from: p(535, 245), to: p(580, 250), excluding: high.id)
+        precondition(swept?.surface.id == middle.id && abs((swept?.point.x ?? 0) - 553) < 0.01,
+                     "The lower ledge is hit at the instant of crossing even when the next sample has already passed the edge")
+        precondition(scene.sweptLanding(from: p(267, 243), to: p(287, 255), excluding: high.id) == nil,
+                     "A covered section of the lower window cannot catch the ball")
+        precondition(scene.sweptLanding(from: p(271, 249), to: p(332, 256), excluding: high.id) == nil,
+                     "Moving into a ledge from below does not put the ball on top")
+        let lipStart = p(565, 243), lipEnd = p(569, 260)
+        precondition(scene.sweptLanding(from: lipStart, to: lipEnd, excluding: high.id) == nil)
+        let corner = scene.sweptLanding(from: lipStart, to: lipEnd, radius: 28, excluding: high.id)
+        precondition(corner?.surface.id == middle.id && corner?.onCorner == true && corner?.point.x == 555,
+                     "The underside of a ball can land on an exposed lip even when its centre never crosses the top")
+        precondition(scene.sweptLanding(from: p(576, 246), to: p(581, 265), radius: 28, excluding: high.id) == nil,
+                     "The far side of a ball does not stick to a wall")
+        precondition(scene.sweptLanding(from: p(564, 278), to: p(552, 292), radius: 28, excluding: high.id) == nil,
+                     "The underside of a window does not catch a passing ball")
+
+        var rolled = RolledSnow()
+        rolled.take(at: p(200, 109), time: 1, snow: &scene)
+        rolled.roll(to: p(246, 109), time: 1.18, snow: &scene, within: region.size)
+        rolled.roll(to: p(270, 109), time: 1.30, snow: &scene, within: region.size)
+        precondition(rolled.held != nil && rolled.balls.first?.rest != nil)
+        rolled.roll(to: p(299, 109), time: 1.337, snow: &scene, within: region.size)
+        let departure = rolled.balls[0]
+        precondition(rolled.held == nil && departure.rest == nil && departure.velocity.dx > 50)
+        precondition(abs(departure.center.x - 290) < 0.01 && abs(departure.ledgeTravel!.originY - 118) < 0.01)
+        rolled.roll(to: p(720, 198), time: 1.41, snow: &scene, within: region.size)
+        precondition(rolled.balls[0].center == departure.center, "The ball has already slipped away while the mouse is still pressed")
+
+        var caught: [CGFloat] = []
+        for _ in 0..<300 {
+            rolled.advance(1.0 / 60, size: region.size, snow: &scene, reduced: false)
+            if let height = rolled.balls.first?.ledgeTravel?.originY, caught.last != height { caught.append(height) }
+        }
+        precondition(caught == [118, 247, 377, 600], "The same ball must hit each exposed step in order and survive across several shorter falls, got \(caught)")
+        precondition(rolled.balls[0].id == departure.id && rolled.balls[0].rest != nil
+                     && rolled.balls[0].mass == departure.mass && scene.looseSnow.isEmpty && scene.drift(on: .floor) == nil)
+
+        func drop(from top: CGFloat, catchAt lower: CGFloat? = nil, reduced: Bool = false,
+                  afterRelease: Bool = false) -> (broke: Bool, support: SurfaceID?) {
+            let upper = ledge(85, at: top, from: 200, to: 375)
+            let catcher = lower.map { ledge(86, at: $0, from: 350, to: 746, behind: [upper]) }
+            var scene = fixture([upper] + (catcher.map { [$0] } ?? []))
+            var rolled = RolledSnow()
+            let pathY = top - 8
+            rolled.take(at: p(246, pathY), time: 1, snow: &scene)
+            rolled.roll(to: p(351, pathY), time: 1.38, snow: &scene, within: region.size, reduced: reduced)
+            if afterRelease {
+                rolled.release(at: 1.38, within: region.size)
+                precondition(rolled.balls[0].rest != nil && rolled.balls[0].ledgeTravel == nil)
+            } else {
+                rolled.roll(to: p(391, pathY), time: 1.55, snow: &scene, within: region.size, reduced: reduced)
+                precondition(rolled.held == nil && rolled.balls[0].ledgeTravel != nil)
+            }
+            let original = rolled.balls[0]
+            var broke = false
+            for _ in 0..<300 {
+                rolled.advance(1.0 / 60, size: region.size, snow: &scene, reduced: reduced)
+                if rolled.balls.isEmpty && !broke {
+                    broke = true
+                    precondition(!scene.looseSnow.isEmpty && scene.looseSnow.allSatisfy { $0.position.y > region.maxY - 30 })
+                    precondition(abs(scene.looseSnow.reduce(0) { $0 + $1.mass } - original.mass) < 0.001)
+                }
+                scene.stepFallingSnow(delta: 1.0 / 60, reduced: reduced)
+            }
+            precondition(scene.flakes.isEmpty && scene.looseSnow.isEmpty)
+            if broke {
+                precondition(abs(scene.drift(on: .floor)!.heights.reduce(0, +) - original.mass) < 0.001,
+                             "Every fragment settles into the ground pile while regular snowfall is paused")
+            } else {
+                precondition(rolled.balls[0].id == original.id && scene.drift(on: .floor) == nil)
+            }
+            if case let .surface(id, _) = rolled.balls.first?.rest { return (broke, id) }
+            return (broke, nil)
+        }
+
+        let half = region.maxY - region.height / 2
+        precondition(drop(from: half + 1).support == .floor)
+        precondition(drop(from: half).support == .floor, "Exactly half of the screen is a safe fall")
+        precondition(drop(from: half - 1, reduced: true).broke, "Only a fall strictly over half the screen shatters on the ground")
+        precondition(drop(from: 146, afterRelease: true).broke, "A ball rolled off a ledge by momentum after mouse-up has the same ground impact")
+        precondition(drop(from: 70, catchAt: 446).support == .window(86), "Even a long fall stays intact when caught by a lower window")
+
+        let upper = ledge(87, at: 126, from: 180, to: 365)
+        var narrowScene = fixture([upper])
+        var flick = RolledSnow()
+        flick.take(at: p(215, 118), time: 1, snow: &narrowScene)
+        flick.roll(to: p(350, 118), time: 1.44, snow: &narrowScene, within: region.size)
+        flick.roll(to: p(417, 117), time: 1.47, snow: &narrowScene, within: region.size)
+        let thrown = flick.balls[0]
+        precondition(flick.held == nil && thrown.velocity.dx <= 580 && thrown.velocity.dx > 0)
+        let catchY: CGFloat = 281
+        var originalTrajectory = flick
+        var traceScene = narrowScene
+        while originalTrajectory.balls[0].center.y + thrown.radius < catchY {
+            originalTrajectory.advance(1.0 / 240, size: region.size, snow: &traceScene, reduced: false)
+        }
+        let firstReach = originalTrajectory.balls[0].center.x
+        let exposedLip = ledge(88, at: catchY, from: firstReach + thrown.radius * 0.24, to: 780, behind: [upper])
+        narrowScene.setSurfaces([upper, exposedLip, floor])
+        var contacted = false
+        for _ in 0..<170 {
+            flick.advance(1.0 / 60, size: region.size, snow: &narrowScene, reduced: false)
+            if let startY = flick.balls.first?.ledgeTravel?.originY, abs(startY - catchY) < 0.01 { contacted = true }
+        }
+        precondition(contacted && flick.balls.first?.id == thrown.id,
+                     "A fast push can still be caught by a low window when the ball clips the exposed lip")
+    }
+
+    private static func checkFestiveEffects(in region: CGRect) {
+        let second = region.offsetBy(dx: region.width, dy: 0)
+        precondition(DesktopWeatherPower.fullscreen(region, on: region))
+        precondition(!DesktopWeatherPower.fullscreen(region.insetBy(dx: 0, dy: 24), on: region))
+        precondition(!DesktopWeatherPower.fullscreen(region, on: second))
+        let gust = SnowGust(time: 3, width: region.width, amount: 1, seed: 0)
+        precondition(gust.push(at: region.midX) > 100 && gust.push(at: 0) == 0)
+        precondition(SnowGust(time: 8, width: region.width, amount: 1, seed: 0).strength == 0)
+
+        var normal = DisplayScene(id: 18), saved = DisplayScene(id: 18)
+        let settings = SnowSettings()
+        normal.step(size: region.size, delta: 0, time: 0, settings: settings, reduced: false)
+        saved.step(size: region.size, delta: 0, time: 0, settings: settings, reduced: false, lowPower: true)
+        precondition(saved.flakes.count < normal.flakes.count && saved.flakes.count > normal.flakes.count / 2)
+        precondition(normal.flakes.contains { $0.crystal < settings.crystalMix })
+
+        let hooks = [p(0.12, 0.17), p(0.50, 0.17), p(0.81, 0.33)]
+        let strand = LightStrand(hooks: hooks, slack: 1.2)
+        let anchors = strand.anchors(in: region.size)
+        let points = LightStrand.points(anchors, slack: strand.slack, at: 0, wind: 0, spacing: 12)
+        precondition(points.first == anchors.first && points.last == anchors.last && points.contains(anchors[1]))
+        precondition(points[points.count / 4].y > anchors[0].y && anchors.allSatisfy(strand.bounds(in: region.size, bulbScale: 1).contains))
+        var decoration = Ornament(kind: .lights, display: 1, x: 0.5, y: 0.5)
+        decoration.lightStrand = strand
+        precondition((try! JSONDecoder().decode(Ornament.self, from: JSONEncoder().encode(decoration))).lightStrand == strand)
+
+        let sill = SnowSurface(id: .window(41), rect: CGRect(x: 100, y: 180, width: 440, height: 210),
+                               visible: [100...540], floor: false, cornerRadius: 18)
+        let floor = SnowSurface(id: .floor, rect: CGRect(x: 0, y: region.maxY, width: region.width, height: 1),
+                                visible: [0...region.width], floor: true)
+        let shared = WindowSnowpack()
+        var pack = SnowDrift(width: sill.rect.width, floor: false, seed: 66)
+        for x in stride(from: 24, to: 220, by: 16) { pack.depositImpact(at: CGFloat(x), mass: 22, width: 17) }
+        shared[41] = pack
+        var scene = DisplayScene(id: 91, windowSnow: shared)
+        scene.setSurfaces([sill, floor])
+        var rolled = RolledSnow()
+        rolled.take(at: p(133, 174), time: 0, snow: &scene)
+        rolled.roll(to: p(230, 174), time: 0.15, snow: &scene)
+        let ball = rolled.balls[0]
+        precondition(ball.mass > 4 && abs(pack.heights.reduce(0, +) - shared[41]!.heights.reduce(0, +) - ball.mass) < 0.001)
+        rolled.release(at: 0.15)
+        rolled.advance(0.015, size: region.size, snow: &scene, reduced: false)
+        precondition(rolled.balls[0].center.x > ball.center.x && rolled.held == nil)
+
+        var branch = TreeBranchSnow()
+        branch.step(15, density: 0.8)
+        let before = branch.loads.reduce(0, +)
+        let fallen = branch.shake(at: p(140, 300), in: CGRect(x: 130, y: 240, width: 150, height: 180))
+        precondition(!fallen.isEmpty && branch.loads.reduce(0, +) < before && branch.animating)
+        for (point, mass) in fallen { scene.shedBranchSnow(at: point, load: mass) }
+        precondition(!scene.released.isEmpty)
+
+        var parade = FestiveTraffic()
+        parade.launch()
+        for _ in 0..<660 { parade.step(1.0 / 60, size: region.size, snow: scene, automatic: false, reduced: false) }
+        precondition(parade.flight == nil && parade.gifts.count == 3 && parade.gifts.allSatisfy { $0.rest != nil })
+        let gift = parade.gifts[0].id
+        parade.open(gift)
+        for _ in 0..<120 { parade.step(1.0 / 60, size: region.size, snow: scene, automatic: false, reduced: false) }
+        precondition(!parade.gifts.contains { $0.id == gift } && parade.gifts.count == 2)
+        checkReindeerStride()
+    }
+
+    private static func checkReindeerStride() {
+        let interval = ReindeerPose.cycle / 120
+        let sequence = (0...120).map { ReindeerPose(age: CGFloat($0) * interval, offset: 0.0, reduced: false) }
+        var aired = false
+        for (first, next) in zip(sequence, sequence.dropFirst()) {
+            let supporting = next.legs.filter(\.planted).count
+            precondition(next.legs.count == 4 && supporting <= 2)
+            aired = aired || supporting == 0
+            for (before, after) in zip(first.legs, next.legs) {
+                precondition(hypot(before.ankle.x - after.ankle.x, before.ankle.y - after.ankle.y) < 17)
+                precondition(abs(before.hoofAngle - after.hoofAngle) < 0.18)
+                if let stifle = after.stifle {
+                    precondition(abs(hypot(stifle.x - after.root.x, stifle.y - after.root.y) - 146) < 0.01)
+                }
+            }
+        }
+        precondition(aired, "The stride alternates stance, push-off, and suspension")
+        let parked = ReindeerPose(age: 0, offset: 0.0, reduced: true)
+        let stationary = ReindeerPose(age: 2.4, offset: 0.34, reduced: true)
+        precondition(parked.body == stationary.body && parked.legs.map(\.ankle) == stationary.legs.map(\.ankle))
+        let screen = CGSize(width: 640, height: 540)
+        let forward = SleighFlight(direction: 1, age: 4.5)
+        let reverse = SleighFlight(direction: -1, age: 4.5)
+        precondition(abs(forward.giftAnchor(in: screen).x + reverse.giftAnchor(in: screen).x - screen.width) < 0.001)
+        if Bundle.main.bundleURL.pathExtension == "app" { precondition(SleighFlightArt.spritesAvailable) }
     }
 
     private static func checkWindowSnowCorners() {

@@ -1,6 +1,16 @@
 import CoreGraphics
 
 struct WindowSnowClump {
+    private struct CornerSlide {
+        let window: UInt32
+        let left: Bool
+        let radius: CGFloat
+        let duration: CGFloat
+        var elapsed: CGFloat = 0
+
+        var direction: CGFloat { left ? -1 : 1 }
+    }
+
     private(set) var center: CGPoint
     private(set) var angle: CGFloat
     let width: CGFloat
@@ -12,6 +22,10 @@ struct WindowSnowClump {
     private var velocity: CGVector
     private let spin: CGFloat
     private var delay: CGFloat
+    private var slide: CornerSlide?
+
+    var overflowSource: SurfaceID? { slide.map { .window($0.window) } }
+    var followsCorner: Bool { slide.map { $0.elapsed < $0.duration } ?? false }
 
     private init(center: CGPoint, width: CGFloat, thickness: CGFloat, mass: CGFloat,
                  velocity: CGVector, spin: CGFloat, delay: CGFloat, shape: CGFloat, pendingWindow: UInt32?) {
@@ -80,6 +94,38 @@ struct WindowSnowClump {
             }
         }
         return pieces
+    }
+
+    static func spill(window: UInt32, edge: CGPoint, radius: CGFloat, left: Bool, mass: CGFloat,
+                      reduced: Bool, random: inout SnowRandom) -> Self {
+        let slide = CornerSlide(window: window, left: left, radius: radius, duration: reduced ? 0.16 : 0.31)
+        let width = min(13, 6 + mass * 0.75)
+        let thickness = min(5.2, max(2.5, mass * SnowDrift.spacing / width * 0.86))
+        var clump = Self(center: p(edge.x - slide.direction * radius, edge.y - thickness * 0.48),
+                         width: width, thickness: thickness, mass: mass,
+                         velocity: CGVector(dx: slide.direction * random.inRange(14, 27), dy: 65),
+                         spin: reduced ? 0 : slide.direction * random.inRange(1.2, 2.6),
+                         delay: 0, shape: random.inRange(0, 1), pendingWindow: nil)
+        clump.slide = slide
+        return clump
+    }
+
+    mutating func advanceAlongCorner(_ delta: CGFloat, on surface: SnowSurface?, floor: CGRect, reduced: Bool) -> Bool {
+        guard var slide, slide.elapsed < slide.duration else { return false }
+        guard let edge = surface?.overflowCorner(left: slide.left, on: floor) else {
+            slide.elapsed = slide.duration
+            self.slide = slide
+            return false
+        }
+        slide.elapsed = min(slide.duration, slide.elapsed + delta)
+        self.slide = slide
+        let progress = slide.elapsed / slide.duration
+        let turn = (0.64 * progress + 0.36 * progress * progress) * .pi / 2
+        let shell = slide.radius + thickness * 0.48
+        center = p(edge.x + slide.direction * (shell * sin(turn) - slide.radius),
+                   edge.y + slide.radius - shell * cos(turn))
+        if !reduced { angle = slide.direction * turn }
+        return true
     }
 
     mutating func advance(_ delta: CGFloat, within width: CGFloat) {

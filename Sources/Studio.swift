@@ -328,6 +328,10 @@ struct StudioView: View {
                 rowDivider
                 weatherSlider("风向与风力", icon: .wind, value: $model.settings.wind, range: -1...1, wind: true)
                 rowDivider
+                weatherSlider("晶体雪花", icon: .snow, value: $model.settings.crystalMix, range: 0...1)
+                rowDivider
+                weatherSlider("局部阵风", icon: .wind, value: $model.settings.gusts, range: 0...1)
+                rowDivider
                 settingsRow("降雪位置", icon: .layer) {
                     Picker("降雪位置", selection: $model.settings.layer) {
                         ForEach(SnowLayer.allCases) { Text($0.title).tag($0) }
@@ -335,11 +339,24 @@ struct StudioView: View {
                     .labelsHidden()
                     .pickerStyle(.menu)
                 }
+                rowDivider
+                settingsRow("全屏时自动避让", subtitle: "只隐藏全屏应用所在屏幕的效果", icon: .layer) {
+                    Toggle("全屏时自动避让", isOn: $model.settings.avoidFullscreen).labelsHidden()
+                }
+                rowDivider
+                settingsRow("自动省电", subtitle: "使用电池、低电量模式或温度较高时降低绘制频率", icon: .dim) {
+                    Toggle("自动省电", isOn: $model.settings.adaptivePower).labelsHidden()
+                }
             }
             settingsGroup(.ground) {
                 settingsRow("在窗口和屏幕底部积雪", icon: .accumulation) {
                     Toggle("在窗口和屏幕底部积雪", isOn: $model.settings.accumulate).labelsHidden()
                 }
+                rowDivider
+                settingsRow("鼠标搓雪球", icon: .snow) {
+                    Toggle("鼠标搓雪球", isOn: $model.settings.rollSnowballs).labelsHidden()
+                }
+                .disabled(!model.settings.accumulate)
                 rowDivider
                 settingsRow("形成冰柱", icon: .icicles) {
                     Toggle("形成冰柱", isOn: $model.settings.icicles).labelsHidden()
@@ -551,6 +568,8 @@ struct StudioView: View {
             HStack {
                 Button("拖雪球堆人…") { model.startSnowman?() }
                     .buttonStyle(StudioButton(prominent: true))
+                Button("自由挂彩灯…") { model.hangLights?(nil) }
+                    .buttonStyle(StudioButton())
                 Button(model.settings.ornamentsVisible ? "收起装饰" : "恢复装饰") {
                     model.settings.ornamentsVisible.toggle()
                 }
@@ -564,6 +583,12 @@ struct StudioView: View {
                 .disabled(model.settings.ornaments.isEmpty)
                 Spacer()
             }
+            settingsRow("雪橇送礼物", subtitle: "礼物落稳后可以点开", icon: .gift) {
+                Button("让雪橇出发") { model.hideStudio?(); model.sendSleigh?() }
+                    .buttonStyle(StudioButton())
+                Toggle("自动雪橇送礼物", isOn: $model.settings.festiveVisits).labelsHidden()
+            }
+            .surface()
             if model.settings.ornaments.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     sectionTitle("已摆放的装饰", icon: .decorations)
@@ -580,7 +605,7 @@ struct StudioView: View {
                                 HStack(spacing: 8) {
                                     StudioIconView(icon: StudioIcon(ornament: ornament.kind), size: 18)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(ornament.kind.title)
+                                        Text(ornament.title)
                                         if let owner = ornament.anchor?.owner {
                                             Text(owner).font(.system(size: 10)).foregroundStyle(mist).lineLimit(1)
                                         }
@@ -609,7 +634,7 @@ struct StudioView: View {
     private func decorationSettings(_ ornament: Ornament) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                sectionTitle(ornament.kind.title, icon: StudioIcon(ornament: ornament.kind))
+                sectionTitle(ornament.title, icon: StudioIcon(ornament: ornament.kind))
                 Spacer()
                 Button(role: .destructive) {
                     model.remove(ornament.id)
@@ -660,6 +685,10 @@ struct StudioView: View {
                 }
             }
             slider("大小", value: ornamentBinding(ornament, \.scale), range: 0.5...2.0)
+            if ornament.lightStrand != nil {
+                Button("编辑挂钩…") { model.hangLights?(ornament.id) }
+                    .buttonStyle(StudioButton(prominent: true))
+            } else {
             HStack(spacing: 8) {
                 Button(ornament.anchor == nil ? "放到窗口上" : "更换窗口") {
                     model.pickWindow(for: ornament.id)
@@ -683,6 +712,7 @@ struct StudioView: View {
                 }
             } else if ornament.kind != .lights {
                 slider("沿窗口移动", value: ornamentBinding(ornament, \.x), range: 0.02...0.98)
+            }
             }
             if ornament.kind == .calendar {
                 let available = ornament.availableDoors(on: Date())

@@ -61,7 +61,6 @@ internal sealed class Overlay : Window
 
 internal sealed class WeatherVisual(SnowScene scene) : FrameworkElement
 {
-    public bool ShowFlakes { get; set; }
     public bool Dim { get; set; }
     public double Time { get; set; }
 
@@ -69,7 +68,7 @@ internal sealed class WeatherVisual(SnowScene scene) : FrameworkElement
     {
         if (ActualWidth < 1 || ActualHeight < 1) return;
         context.PushTransform(new ScaleTransform(ActualWidth / scene.Monitor.Width, ActualHeight / scene.Monitor.Height));
-        SnowArt.Paint(context, scene, ShowFlakes, Dim, Time);
+        SnowArt.Paint(context, scene, Dim, Time);
         context.Pop();
     }
 }

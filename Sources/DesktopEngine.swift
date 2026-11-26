@@ -8,10 +8,12 @@ private let windowCornerRadius: CGFloat = {
 }()
 
 private final class OverlayPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
+    private let keyboard: Bool
+    override var canBecomeKey: Bool { keyboard }
     override var canBecomeMain: Bool { false }
 
-    init(frame: CGRect, level: NSWindow.Level, interactive: Bool) {
+    init(frame: CGRect, level: NSWindow.Level, interactive: Bool, keyboard: Bool = false) {
+        self.keyboard = keyboard
         super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
@@ -40,14 +42,8 @@ private final class PaintView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        var rects: UnsafePointer<NSRect>?
-        var count = 0
-        getRectsBeingDrawn(&rects, count: &count)
         ctx.saveGState()
-        if let rects, count > 1 {
-            ctx.addRects(Array(UnsafeBufferPointer(start: rects, count: count)))
-            ctx.clip()
-        }
+        ctx.clip(to: dirtyRect)
         ctx.clear(dirtyRect)
         paint?(Ink(ctx: ctx), dirtyRect)
         ctx.restoreGState()
@@ -61,27 +57,42 @@ private final class HandleView: NSView {
     var remove: (() -> Void)?
     var settings: (() -> Void)?
     var knock: (() -> Void)?
+    var key: ((UInt16) -> Void)?
+    var wheel: ((CGFloat) -> Void)?
+    var guides: ((Ink) -> Void)?
     var selectionHint: String?
     var editTitle = "在工作台编辑"
     var removalTitle = "移除装饰"
 
     override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { key != nil }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let ink = Ink(ctx: ctx)
-        ink.fill(bounds, 0x000000, alpha: selectionHint != nil ? 0.19 : 0.008)
+        ink.fill(bounds, 0x000000, alpha: selectionHint == nil ? 0.008 : key == nil ? 0.19 : 0.065)
+        guides?(ink)
         if let selectionHint {
-            let plate = CGRect(x: bounds.midX - 201, y: 52, width: 402, height: 44)
+            let width = min(bounds.width - 20, key == nil ? 402 : 620)
+            let plate = CGRect(x: bounds.midX - width / 2, y: 52, width: width, height: 44)
             ink.rounded(plate, 12, 0x173145, alpha: 0.96)
             ink.text(selectionHint, at: p(plate.midX, plate.midY), size: 14, color: 0xe0f6ff)
         }
     }
 
-    override func mouseDown(with event: NSEvent) { down?(NSEvent.mouseLocation) }
+    override func mouseDown(with event: NSEvent) {
+        if key != nil { window?.makeKey(); window?.makeFirstResponder(self) }
+        down?(NSEvent.mouseLocation)
+    }
     override func mouseDragged(with event: NSEvent) { drag?(NSEvent.mouseLocation) }
     override func mouseUp(with event: NSEvent) { up?(NSEvent.mouseLocation) }
+    override func keyDown(with event: NSEvent) {
+        if let key { key(event.keyCode) } else { super.keyDown(with: event) }
+    }
+    override func scrollWheel(with event: NSEvent) {
+        if let wheel { wheel(event.scrollingDeltaY) } else { super.scrollWheel(with: event) }
+    }
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: selectionHint != nil ? .crosshair : drag == nil ? .pointingHand : .openHand)
@@ -112,6 +123,56 @@ private final class HandleView: NSView {
     @objc private func knockDown() { knock?() }
 }
 
+private final class SnowRollView: NSView {
+    private final class MenuAction: NSObject {
+        let run: () -> Void
+        init(_ run: @escaping () -> Void) { self.run = run }
+    }
+
+    var press: ((CGPoint, Double) -> Void)?
+    var drag: ((CGPoint, Double) -> Void)?
+    var release: ((CGPoint, Double) -> Void)?
+    var menuAt: ((CGPoint, SnowRollView) -> NSMenu?)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.black.withAlphaComponent(0.008).setFill()
+        dirtyRect.fill()
+    }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
+
+    private func location(of event: NSEvent) -> CGPoint {
+        window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control) {
+            rightMouseDown(with: event)
+        } else {
+            press?(location(of: event), event.timestamp)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) { drag?(location(of: event), event.timestamp) }
+    override func mouseUp(with event: NSEvent) { release?(location(of: event), event.timestamp) }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if let menu = menuAt?(location(of: event), self) {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        }
+    }
+
+    func item(_ title: String, image: NSImage? = nil, run: @escaping () -> Void) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(choose(_:)), keyEquivalent: "")
+        item.target = self
+        item.image = image
+        item.representedObject = MenuAction(run)
+        return item
+    }
+
+    @objc private func choose(_ sender: NSMenuItem) { (sender.representedObject as? MenuAction)?.run() }
+}
+
 private struct OrnamentHandleKey: Hashable {
     let ornament: UUID
     let display: UInt32
@@ -138,6 +199,9 @@ private final class ScreenOverlay {
     var placements: [(Ornament, CGRect, DesktopWindow?)] = []
     var fallingSnowmen: [FallingSnowman] = []
     var plowedSnowmen: [PlowedSnowman] = []
+    var rolledSnow = RolledSnow()
+    var festivities = FestiveTraffic()
+    var treeSnow: [UUID: TreeBranchSnow] = [:]
     var plowedDecorations: [PlowedDecoration] = []
     private var drawnSnow: [SurfaceID: (seed: UInt64, revision: UInt64)] = [:]
     var visibleBack = false
@@ -201,6 +265,34 @@ private final class ScreenOverlay {
 
 @MainActor
 final class DesktopEngine {
+    private struct PropDrag {
+        let ball: UUID
+        let prop: UUID
+        let offset: CGVector
+    }
+
+    private struct SnowRollGesture {
+        let display: UInt32
+        let start: CGPoint
+        let time: Double
+        let ball: UUID?
+        let prop: PropDrag?
+        var started = false
+    }
+
+    private struct SnowRollHit {
+        let screen: ScreenOverlay
+        let rect: CGRect
+        let ball: RolledSnowball?
+        var prop: SnowballProp?
+    }
+    private struct LightDraft {
+        var display: UInt32?
+        var ornament: Ornament?
+        var hooks: [CGPoint] = []
+        var slack: CGFloat = 1
+        var movingHook: Int?
+    }
     private struct SnowmanPerch {
         let display: UInt32
         let ornament: Ornament
@@ -248,7 +340,7 @@ final class DesktopEngine {
     }
 
     let model: SnowModel
-    var studioFrame: (() -> CGRect?)?
+    var studioWindow: (() -> NSWindow?)?
     private let windowSnow = WindowSnowpack()
     private var screens: [UInt32: ScreenOverlay] = [:]
     private var windows: [DesktopWindow] = []
@@ -283,6 +375,16 @@ final class DesktopEngine {
     private var workshopSource: UUID?
     private var ballDragStart: (id: Int, point: CGPoint)?
     private var picking: [OverlayPanel] = []
+    private var lightDraft: LightDraft?
+    private var snowRollGesture: SnowRollGesture?
+    private var snowRollHandle: OverlayPanel?
+    private var snowPointerMonitor: Any?
+    private var giftHandles: [UUID: (UInt32, OverlayPanel)] = [:]
+    private var fullscreenDisplays = Set<UInt32>()
+    private var screensAsleep = false
+    private var powerLimited = false
+    private var lastPowerCheck: Double = -.infinity
+    private var loopFPS: Double = 0
     private var dragSession: OrnamentDragSession?
     private var dragLayoutDirty = false
     private var lastHandlesShowing = false
@@ -295,27 +397,65 @@ final class DesktopEngine {
     private var lastCanvasReducedMotion = false
     private var calendarDay: Date?
     private var lastStudioFrame: CGRect?
+    private var studioPresentation: (number: Int, logicalFrame: CGRect, visibleFrame: CGRect?, checked: Double)?
     private let pid = ProcessInfo.processInfo.processIdentifier
 
     init(model: SnowModel) {
         self.model = model
         updateScreens()
-        let timer = Timer(timeInterval: 1.0 / 60, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
-        timer.tolerance = 0.002
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        scheduleTimer(fps: 60)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(spaceChanged),
                                                            name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(applicationActivated),
                                                            name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(self, selector: #selector(sleepDisplays), name: NSWorkspace.screensDidSleepNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(sleepDisplays), name: NSWorkspace.willSleepNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(wakeDisplays), name: NSWorkspace.screensDidWakeNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(wakeDisplays), name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    private func scheduleTimer(fps: Double) {
+        guard fps != loopFPS || timer == nil else { return }
+        timer?.invalidate()
+        let next = Timer(timeInterval: 1 / fps, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
+        next.tolerance = 0.002
+        RunLoop.main.add(next, forMode: .common)
+        timer = next
+        loopFPS = fps
+    }
+
+    @objc private func sleepDisplays() {
+        screensAsleep = true
+        timer?.invalidate()
+        timer = nil
+        monitorSnowPointer(false)
+        cancelActivity()
+        for screen in screens.values { screen.setVisibility(back: false, front: false) }
+        for (panel, _) in handles.values { panel.orderOut(nil) }
+        for (panel, _) in ballHandles.values { panel.orderOut(nil) }
+        for (_, panel) in giftHandles.values { panel.orderOut(nil) }
+    }
+
+    @objc private func wakeDisplays() {
+        guard screensAsleep else { return }
+        screensAsleep = false
+        lastTick = CACurrentMediaTime()
+        lastWeatherTick = 0
+        lastScan = 0
+        layoutDirty = true
+        scheduleTimer(fps: !screens.isEmpty && fullscreenDisplays.count == screens.count ? 12 : powerLimited ? 40 : 60)
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        monitorSnowPointer(false)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         for overlay in screens.values { overlay.setVisibility(back: false, front: false) }
         for (panel, _) in handles.values { panel.orderOut(nil) }
+        for (_, panel) in giftHandles.values { panel.orderOut(nil) }
+        cancelActivity()
         finishPicking(nil, reopen: false)
         cancelSnowman()
     }
@@ -324,6 +464,7 @@ final class DesktopEngine {
         let external = NSScreen.screens
         dockDisplays = external
         primaryTop = external.first?.frame.maxY ?? 0
+        studioPresentation = nil
         let ids = Set(external.map(\.snowScreenID))
         let displaysChanged = ids != Set(screens.keys) || external.contains { screens[$0.snowScreenID]?.frame != $0.frame }
         for key in Array(screens.keys) where !ids.contains(key) {
@@ -353,18 +494,22 @@ final class DesktopEngine {
         layoutDirty = true
         if model.pickingWindow { finishPicking(nil) }
         if displaysChanged {
+            cancelActivity()
             cancelOrnamentDrag()
             if model.buildingSnowman { cancelSnowman() }
         }
     }
 
     func clear() {
+        cancelSnowRoll()
         if !windowExits.isEmpty { layoutDirty = true }
         windowExits.removeAll(keepingCapacity: true)
         windowSnow.clear()
         for screen in screens.values {
             screen.sim.clearAccumulation()
             screen.fallingSnowmen.removeAll()
+            screen.treeSnow.removeAll()
+            screen.rolledSnow = RolledSnow()
             screen.frontView.needsDisplay = true
         }
     }
@@ -382,6 +527,7 @@ final class DesktopEngine {
     }
 
     func preview() {
+        cancelActivity()
         cancelSnowman()
         model.hideStudio?()
         model.preview = true
@@ -390,6 +536,7 @@ final class DesktopEngine {
     }
 
     func beginPicking() {
+        cancelActivity()
         if model.buildingSnowman { cancelSnowman() }
         guard picking.isEmpty else { return }
         if screens.isEmpty { finishPicking(nil); return }
@@ -406,16 +553,27 @@ final class DesktopEngine {
         }, onCancel: { [weak self] in self?.finishPicking(nil) })
     }
 
-    private func showPicker(hint: String, onClick: @escaping (CGPoint) -> Void, onCancel: @escaping () -> Void) {
-        for screen in screens.values {
-            let panel = OverlayPanel(frame: screen.frame, level: .init(rawValue: overlayLevel.rawValue + 2), interactive: true)
+    private func showPicker(hint: String, onClick: @escaping (CGPoint) -> Void, onCancel: @escaping () -> Void,
+                            drag: ((CGPoint) -> Void)? = nil, up: ((CGPoint) -> Void)? = nil,
+                            key: ((UInt16) -> Void)? = nil, wheel: ((CGFloat) -> Void)? = nil,
+                            guides: ((UInt32, Ink) -> Void)? = nil) {
+        let pointer = NSEvent.mouseLocation
+        for screen in screens.values where !fullscreenDisplays.contains(screen.id) {
+            let panel = OverlayPanel(frame: screen.frame, level: .init(rawValue: overlayLevel.rawValue + 2),
+                                     interactive: true, keyboard: key != nil)
             let view = HandleView()
             view.selectionHint = hint
             view.down = onClick
             view.remove = onCancel
+            view.drag = drag
+            view.up = up
+            view.key = key
+            view.wheel = wheel
+            if let guides { view.guides = { [id = screen.id] ink in guides(id, ink) } }
             panel.contentView = view
             picking.append(panel)
             panel.orderFrontRegardless()
+            if key != nil && screen.frame.contains(pointer) { panel.makeKey(); panel.makeFirstResponder(view) }
         }
     }
 
@@ -431,8 +589,320 @@ final class DesktopEngine {
         picking.removeAll()
     }
 
+    private func cancelActivity(reopen: Bool = false) {
+        cancelSnowRoll()
+        guard lightDraft != nil else { return }
+        lightDraft = nil
+        dismissPicker()
+        layoutDirty = true
+        if reopen { model.showStudio?() }
+    }
+
+    private func prepareActivity() -> Bool {
+        guard screens.values.contains(where: { !fullscreenDisplays.contains($0.id) }) else {
+            model.feedback = "请先回到普通桌面。"
+            return false
+        }
+        if model.pickingWindow { finishPicking(nil, reopen: false) }
+        cancelSnowman()
+        cancelActivity()
+        model.editMode = false
+        model.hideStudio?()
+        return true
+    }
+
+    private var canRollSnow: Bool {
+        model.settings.rollSnowballs && model.settings.accumulate && !screensAsleep && !model.preview
+            && !model.pickingWindow && !model.editMode && !model.buildingSnowman && lightDraft == nil
+    }
+
+    private func monitorSnowPointer(_ enabled: Bool) {
+        if enabled && snowPointerMonitor == nil {
+            snowPointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in
+                self?.refreshSnowRollHandle(at: NSEvent.mouseLocation)
+            }
+        } else if !enabled, let snowPointerMonitor {
+            NSEvent.removeMonitor(snowPointerMonitor)
+            self.snowPointerMonitor = nil
+        }
+    }
+
+    private func snowRollHit(at point: CGPoint) -> SnowRollHit? {
+        guard canRollSnow, presentedStudio()?.frame.contains(point) != true,
+              let screen = screens.values.first(where: { $0.frame.contains(point) && !fullscreenDisplays.contains($0.id) }),
+              !handles.values.contains(where: { $0.0.isVisible && $0.0.frame.contains(point) }),
+              !giftHandles.values.contains(where: { $0.1.isVisible && $0.1.frame.contains(point) }) else { return nil }
+        let local = screen.local(CGRect(origin: point, size: .zero)).origin
+        for ball in screen.rolledSnow.paintedBalls.reversed() {
+            if let hit = SnowballPropArt.hit(at: local, on: ball), let prop = ball.props.first(where: { $0.id == hit.id }) {
+                return SnowRollHit(screen: screen, rect: hit.frame, ball: ball, prop: prop)
+            }
+            if let rect = ball.grabFrame(at: local) { return SnowRollHit(screen: screen, rect: rect, ball: ball) }
+        }
+        return screen.sim.rollHandle(at: local).map { SnowRollHit(screen: screen, rect: $0, ball: nil) }
+    }
+
+    private func refreshSnowRollHandle(at point: CGPoint) {
+        if !canRollSnow { cancelSnowRoll(); return }
+        guard snowRollGesture == nil, NSEvent.pressedMouseButtons == 0 else { return }
+        guard let hit = snowRollHit(at: point) else { snowRollHandle?.orderOut(nil); return }
+        let frame = hit.screen.global(hit.rect).intersection(hit.screen.frame)
+        guard frame.width >= 1, frame.height > 0.45 else { snowRollHandle?.orderOut(nil); return }
+        let panel: OverlayPanel
+        if let existing = snowRollHandle { panel = existing }
+        else {
+            panel = OverlayPanel(frame: frame, level: .init(rawValue: overlayLevel.rawValue + 1), interactive: true)
+            let view = SnowRollView(frame: .zero)
+            view.press = { [weak self] point, time in self?.beginSnowRoll(at: point, time: time) }
+            view.drag = { [weak self] point, time in self?.rollSnow(to: point, time: time) }
+            view.release = { [weak self] point, time in self?.releaseSnow(at: point, time: time) }
+            view.menuAt = { [weak self] point, view in self?.snowRollMenu(at: point, view: view) }
+            panel.contentView = view
+            snowRollHandle = panel
+        }
+        panel.contentView?.setAccessibilityLabel(hit.prop?.kind.title ?? (hit.ball == nil ? "搓雪球" : "雪球"))
+        if panel.frame != frame { panel.setFrame(frame, display: true) }
+        if !panel.isVisible { panel.orderFrontRegardless() }
+    }
+
+    private func snowRollMenu(at point: CGPoint, view: SnowRollView) -> NSMenu? {
+        guard let hit = snowRollHit(at: point), let ball = hit.ball else { return nil }
+        let screen = hit.screen
+        let id = ball.id
+        let local = screen.local(CGRect(origin: point, size: .zero)).origin
+        let attachment = p((local.x - ball.center.x) / ball.radius, (local.y - ball.center.y) / ball.radius)
+        let menu = NSMenu()
+        let keptFree = ball.freeStack || !model.settings.automaticallyFinishSnowman
+        let free = view.item("自由堆叠") { [weak self, weak screen] in
+            guard let self else { return }
+            screen?.rolledSnow.setFree(!keptFree, for: id)
+            self.layoutDirty = true
+        }
+        free.state = keptFree ? .on : .off
+        free.isEnabled = model.settings.automaticallyFinishSnowman
+            && screen.rolledSnow.canToggleFree(for: id)
+        menu.autoenablesItems = false
+        menu.addItem(free)
+        if screen.rolledSnow.canFinishStack(containing: id) {
+            menu.addItem(view.item("堆成雪人") { [weak self] in self?.finishRolledSnowman(containing: id) })
+        }
+        for choices: [SnowballPropChoice] in [[.eyes, .carrot, .coal], [.leftTwig, .rightTwig], [.feltHat, .woolHat, .scarf]] {
+            menu.addItem(.separator())
+            for choice in choices {
+                let icon = SnowballPropArt.thumbnail(for: choice.kind)
+                menu.addItem(view.item(choice.kind.title, image: icon) { [weak self, weak screen] in
+                    guard let screen, let current = screen.rolledSnow.ball(id) else { return }
+                    let anchor = p(current.center.x + attachment.x * current.radius, current.center.y + attachment.y * current.radius)
+                    screen.rolledSnow.addProp(choice, to: id, at: anchor)
+                    self?.layoutDirty = true
+                })
+            }
+        }
+        if !ball.props.isEmpty {
+            menu.addItem(.separator())
+            if let prop = hit.prop {
+                menu.addItem(view.item("取下" + prop.kind.title) { [weak self, weak screen] in
+                    screen?.rolledSnow.removeProp(prop.id, from: id)
+                    self?.layoutDirty = true
+                })
+            }
+            menu.addItem(view.item("取下这颗雪球的全部道具") { [weak self, weak screen] in
+                screen?.rolledSnow.removeProp(nil, from: id)
+                self?.layoutDirty = true
+            })
+        }
+        return menu
+    }
+
+    private func beginSnowRoll(at point: CGPoint, time: Double) {
+        guard let hit = snowRollHit(at: point) else { return }
+        let local = hit.screen.local(CGRect(origin: point, size: .zero)).origin
+        let prop: PropDrag?
+        if let piece = hit.prop, let ball = hit.ball {
+            let anchor = piece.worldAnchor(on: ball)
+            prop = PropDrag(ball: ball.id, prop: piece.id, offset: CGVector(dx: anchor.x - local.x, dy: anchor.y - local.y))
+        } else { prop = nil }
+        snowRollGesture = SnowRollGesture(display: hit.screen.id, start: local, time: time, ball: hit.ball?.id, prop: prop)
+    }
+
+    private func rollSnow(to point: CGPoint, time: Double) {
+        guard canRollSnow, var gesture = snowRollGesture, let screen = screens[gesture.display] else { return }
+        let local = screen.local(CGRect(origin: point, size: .zero)).origin
+        if let piece = gesture.prop {
+            guard hypot(local.x - gesture.start.x, local.y - gesture.start.y) > 1.6 || gesture.started else { return }
+            screen.rolledSnow.moveProp(piece.prop, on: piece.ball, to: p(local.x + piece.offset.dx, local.y + piece.offset.dy))
+            gesture.started = true
+            snowRollGesture = gesture
+            return
+        }
+        if !gesture.started {
+            guard hypot(local.x - gesture.start.x, local.y - gesture.start.y) > 2.5 else { return }
+            screen.rolledSnow.take(at: gesture.start, time: max(gesture.time, time - 0.021),
+                                   snow: &screen.sim, preferred: gesture.ball)
+            gesture.started = true
+            snowRollGesture = gesture
+        }
+        screen.rolledSnow.roll(to: local, time: time, snow: &screen.sim, within: screen.frame.size, reduced: reducedMotion)
+    }
+
+    private func releaseSnow(at point: CGPoint, time: Double) {
+        rollSnow(to: point, time: time)
+        let automatic = model.settings.automaticallyFinishSnowman
+        if let gesture = snowRollGesture, gesture.started, let screen = screens[gesture.display] {
+            if gesture.prop != nil {
+                layoutDirty = true
+            } else if let stacked = screen.rolledSnow.release(at: time, freely: !automatic, within: screen.frame.size), automatic {
+                finishRolledSnowman(containing: stacked, minimum: 3, showWardrobe: false, automatic: true)
+            }
+        }
+        snowRollGesture = nil
+        refreshSnowRollHandle(at: point)
+    }
+
+    private func cancelSnowRoll() {
+        if let gesture = snowRollGesture, gesture.started, gesture.prop == nil {
+            screens[gesture.display]?.rolledSnow.release(at: .infinity, stacking: false)
+        }
+        snowRollGesture = nil
+        snowRollHandle?.orderOut(nil)
+    }
+
+    var hasRolledSnowman: Bool { screens.values.contains { $0.rolledSnow.hasStack } }
+
+    func finishRolledSnowman(containing member: UUID? = nil, minimum: Int = 2, showWardrobe: Bool = true,
+                            automatic: Bool = false) {
+        for screen in screens.values {
+            guard let stack = screen.rolledSnow.takeStack(containing: member, minimum: minimum, automatic: automatic) else { continue }
+            let point = screen.global(CGRect(origin: stack.base.center, size: .zero)).origin
+            let x = (point.x - screen.usable.minX) / screen.usable.width
+            var ornament = Ornament(kind: .snowman, display: screen.id, x: Double(x), y: 0.1)
+            ornament.scale = min(2, max(0.38, stack.base.radius / SnowmanArt.radii[0]))
+            ornament.snowballs = stack.count
+            ornament.snowmanFollowsGround = true
+            if case let .window(id) = stack.surface, let target = windows.first(where: { $0.id == id }) {
+                ornament.anchor = target.anchor
+                ornament.x = Double((point.x - target.rect.minX) / target.rect.width)
+            }
+            model.add(ornament)
+            layoutDirty = true
+            if showWardrobe { model.showWardrobe?(ornament.id, nil) }
+            return
+        }
+    }
+
+    func beginHangingLights(_ id: UUID? = nil) {
+        guard prepareActivity() else { return }
+        let item = model.settings.ornaments.first { $0.id == id && $0.lightStrand != nil }
+        lightDraft = LightDraft(ornament: item)
+        if let item, let strand = item.lightStrand, let screen = screens[item.display], !fullscreenDisplays.contains(screen.id) {
+            lightDraft = LightDraft(display: screen.id, ornament: item, hooks: strand.anchors(in: screen.frame.size), slack: strand.slack)
+        }
+        showPicker(hint: "点一下挂钩 · 拖动可调整 · 滚轮调松紧 · 回车或右键保存 · Esc 取消",
+                   onClick: { [weak self] point in self?.placeHook(at: point) },
+                   onCancel: { [weak self] in self?.finishLights() },
+                   drag: { [weak self] point in self?.moveHook(to: point) },
+                   up: { [weak self] _ in self?.lightDraft?.movingHook = nil },
+                   key: { [weak self] key in
+                       if key == 53 { self?.cancelActivity(reopen: true) }
+                       if key == 36 || key == 76 { self?.finishLights() }
+                       if key == 51 { self?.undoHook() }
+                   }, wheel: { [weak self] delta in
+                       guard let self, let draft = self.lightDraft else { return }
+                       self.lightDraft?.slack = min(2.8, max(0.15, draft.slack + delta * 0.035))
+                       self.refreshPickerGuides()
+                   }, guides: { [weak self] display, ink in self?.drawLightGuides(on: display, ink: ink) })
+        layoutDirty = true
+    }
+
+    private func refreshPickerGuides() {
+        for panel in picking { panel.contentView?.needsDisplay = true }
+    }
+
+    private func undoHook() {
+        if lightDraft?.hooks.isEmpty == false { lightDraft?.hooks.removeLast() }
+        lightDraft?.movingHook = nil
+        refreshPickerGuides()
+    }
+
+    private func placeHook(at global: CGPoint) {
+        guard var draft = lightDraft, let screen = screens.values.first(where: { $0.frame.contains(global) }),
+              draft.display == nil || draft.display == screen.id else { return }
+        let point = lightHook(global, on: screen)
+        draft.display = screen.id
+        if let index = draft.hooks.firstIndex(where: { hypot($0.x - point.x, $0.y - point.y) < 12 }) {
+            draft.movingHook = index
+        } else if draft.hooks.count < 22 {
+            draft.hooks.append(point)
+            draft.movingHook = draft.hooks.count - 1
+        }
+        lightDraft = draft
+        refreshPickerGuides()
+    }
+
+    private func moveHook(to global: CGPoint) {
+        guard var draft = lightDraft, let display = draft.display, let screen = screens[display],
+              let hook = draft.movingHook, draft.hooks.indices.contains(hook) else { return }
+        draft.hooks[hook] = lightHook(global, on: screen)
+        lightDraft = draft
+        refreshPickerGuides()
+    }
+
+    private func lightHook(_ global: CGPoint, on screen: ScreenOverlay) -> CGPoint {
+        let point = screen.local(CGRect(origin: global, size: .zero)).origin
+        func snap(_ coordinate: CGFloat, edge: CGFloat) -> CGFloat {
+            if coordinate < 20 { return 12 }
+            if edge - coordinate < 20 { return edge - 12 }
+            return coordinate
+        }
+        return p(snap(point.x, edge: screen.frame.width), snap(point.y, edge: screen.frame.height))
+    }
+
+    private func finishLights() {
+        guard let draft = lightDraft, let id = draft.display, let screen = screens[id], draft.hooks.count > 1 else {
+            cancelActivity(reopen: true)
+            return
+        }
+        let hooks = draft.hooks.map { p($0.x / screen.frame.width, $0.y / screen.frame.height) }
+        let strand = LightStrand(hooks: hooks, slack: draft.slack)
+        var item = draft.ornament ?? Ornament(kind: .lights, display: id, x: 0.5, y: 0.5)
+        if draft.ornament == nil { item.lightMotion = .twinkle }
+        item.display = id
+        item.anchor = nil
+        item.lightStrand = strand
+        if draft.ornament == nil { model.add(item) }
+        else { model.change(item.id) { $0 = item } }
+        cancelActivity(reopen: true)
+    }
+
+    private func drawLightGuides(on id: UInt32, ink: Ink) {
+        guard let draft = lightDraft, let screen = screens[id], draft.display == id else { return }
+        var anchors = draft.hooks
+        let pointer = NSEvent.mouseLocation
+        if draft.movingHook == nil, screen.frame.contains(pointer), anchors.count < 22 {
+            anchors.append(lightHook(pointer, on: screen))
+        }
+        if anchors.count > 1 {
+            var item = draft.ornament ?? Ornament(kind: .lights, display: id, x: 0.5, y: 0.5)
+            item.lightStrand = LightStrand(hooks: anchors.map { p($0.x / screen.frame.width, $0.y / screen.frame.height) }, slack: draft.slack)
+            DecorationArt.freeLights(item, screen: screen.frame.size, brush: nil, wind: 0, ink: ink, time: 0)
+        }
+        for hook in draft.hooks {
+            ink.circle(hook.x, hook.y, 7, 0x12304c)
+            ink.circle(hook.x, hook.y, 4.2, 0xa7efff)
+        }
+    }
+
+    func sendSleigh() {
+        let pointer = NSEvent.mouseLocation
+        let available = screens.values.filter { !fullscreenDisplays.contains($0.id) }
+        guard let screen = available.first(where: { $0.frame.contains(pointer) }) ?? available.first else { return }
+        screen.festivities.launch()
+        model.feedback = "雪橇已经出发。"
+    }
+
     @objc private func spaceChanged() {
         spaceChangedAt = CACurrentMediaTime()
+        studioPresentation = nil
         snowmanPerches.removeAll()
         windows.removeAll()
         shakes.removeAll()
@@ -441,12 +911,38 @@ final class DesktopEngine {
         windowSnow.clear()
         layoutDirty = true
         lastScan = 0
+        cancelActivity()
         cancelOrnamentDrag()
         cancelSnowman()
     }
 
     private func getWindows() -> [DesktopWindow] {
-        DesktopWindow.onscreen(primaryTop: primaryTop, ignoring: pid, stageDisplays: stageDisplays)
+        let settingsWindow = studioInSpace.flatMap { UInt32(exactly: $0.windowNumber) }
+        return DesktopWindow.onscreen(primaryTop: primaryTop, ignoring: pid, includingOwnWindow: settingsWindow,
+                                      stageDisplays: stageDisplays)
+    }
+
+    private var studioInSpace: NSWindow? {
+        guard let studio = studioWindow?(), studio.isVisible, !studio.isMiniaturized, studio.isOnActiveSpace,
+              studio.alphaValue > 0.15, !NSApp.isHidden else { return nil }
+        return studio
+    }
+
+    private func presentedStudio(at now: Double = CACurrentMediaTime()) -> (id: UInt32, frame: CGRect)? {
+        guard let studio = studioInSpace, studio.occlusionState.contains(.visible),
+              let id = UInt32(exactly: studio.windowNumber) else {
+            studioPresentation = nil
+            return nil
+        }
+        let number = studio.windowNumber
+        let logicalFrame = studio.frame
+        if let cached = studioPresentation, cached.number == number, cached.logicalFrame == logicalFrame,
+           now - cached.checked < 1.0 / 30 {
+            return cached.visibleFrame.map { (id, $0) }
+        }
+        let frame = DesktopWindow.presentedFrame(of: number, primaryTop: primaryTop)
+        studioPresentation = (number, logicalFrame, frame, now)
+        return frame.map { (id, $0) }
     }
 
     private var stageDisplays: [CGRect] { stageEnabled ? screens.values.map(\.frame) : [] }
@@ -458,6 +954,7 @@ final class DesktopEngine {
     }
 
     func startSnowman() {
+        cancelActivity()
         guard !screens.isEmpty else { return }
         if model.pickingWindow { finishPicking(nil, reopen: false) }
         cancelSnowman()
@@ -511,7 +1008,8 @@ final class DesktopEngine {
         }
         windows = getWindows()
         let hasOrnaments = model.settings.ornamentsVisible && !model.settings.ornaments.isEmpty
-        for display in screens.values { updateLayout(on: display, studio: studioFrame?(), hasOrnaments: hasOrnaments) }
+        let studio = presentedStudio()?.frame
+        for display in screens.values { updateLayout(on: display, studio: studio, hasOrnaments: hasOrnaments) }
         let platforms = workshopPlatforms()
         let clicked = windows.first { !$0.widget && $0.rect.contains(point) }
         let shelf = clicked.flatMap { window in
@@ -693,6 +1191,7 @@ final class DesktopEngine {
     }
 
     @objc private func tick() {
+        guard !screensAsleep else { return }
         let now = CACurrentMediaTime()
         let delta = min(0.065, max(0.001, now - lastTick))
         var dayChanged = false
@@ -708,27 +1207,44 @@ final class DesktopEngine {
             calendarDay = day
         }
         let settings = model.settings
+        if now - lastPowerCheck >= 1.2 {
+            lastPowerCheck = now
+            powerLimited = settings.adaptivePower && DesktopWeatherPower.limited
+        } else if !settings.adaptivePower { powerLimited = false }
+        scheduleTimer(fps: !screens.isEmpty && fullscreenDisplays.count == screens.count ? 12 : powerLimited ? 40 : 60)
         if let source = workshopSource, !settings.ornamentsVisible || !settings.ornaments.contains(where: { $0.id == source }) {
             cancelSnowman()
         }
         let running = model.running
+        if wasRunning && !running && settings.enabled {
+            // Leaving the idle-only mode still restores the regular desktop immediately.
+            clear()
+            for screen in screens.values { screen.sim.flakes.removeAll(keepingCapacity: true) }
+        }
         let hasOrnaments = settings.ornamentsVisible && !settings.ornaments.isEmpty
         let showingHandles = hasOrnaments && !model.preview && !model.pickingWindow
         if let dragSession, !showingHandles || !settings.ornaments.contains(where: { $0.id == dragSession.handle.ornament }) {
             cancelOrnamentDrag()
         }
-        let active = running || hasOrnaments || model.buildingSnowman
+        let tracksSnow = settings.accumulate && (running || !windowSnow.isEmpty || screens.values.contains {
+            $0.sim.hasAccumulation || $0.sim.weatherAnimating || $0.sim.fallingSnowAnimating
+                || !$0.fallingSnowmen.isEmpty || !$0.rolledSnow.isEmpty
+        })
+        let active = running || tracksSnow || hasOrnaments || model.buildingSnowman || lightDraft != nil
             || screens.values.contains {
                 !$0.fallingSnowmen.isEmpty || !$0.plowedSnowmen.isEmpty || !$0.plowedDecorations.isEmpty
-                    || !$0.sim.released.isEmpty || $0.sim.fallingSnowAnimating
+                    || $0.sim.weatherAnimating || $0.sim.fallingSnowAnimating || $0.festivities.active || !$0.rolledSnow.isEmpty
             }
-        let studio = studioFrame?()
-        let changed = settings != lastSettings || model.editMode != lastEditing || studio != lastStudioFrame || wasRunning != running
+        let studio = presentedStudio(at: now)?.frame
+        let studioChanged = studio != lastStudioFrame
+        let changed = settings != lastSettings || model.editMode != lastEditing || studioChanged || wasRunning != running
+        if lastSettings?.accumulate == true && !settings.accumulate {
+            for screen in screens.values { screen.sim.clearAccumulation() }
+        }
         lastSettings = settings
         lastEditing = model.editMode
         lastStudioFrame = studio
 
-        if !running && wasRunning { clear() }
         wasRunning = running
         let tracksWindows = hasOrnaments && settings.ornaments.contains { $0.anchor != nil }
         let mouseDown = (NSEvent.pressedMouseButtons & 1) != 0
@@ -739,11 +1255,12 @@ final class DesktopEngine {
         }
         lastPointer = pointer
         mouseWasDown = mouseDown
-        let tracksSnow = running && settings.accumulate
         let dockChanged = active && updateDock(at: now)
         if !tracksSnow && !windowExits.isEmpty { windowExits.removeAll(keepingCapacity: true) }
         let fastTracking = (tracksSnow || tracksWindows || model.buildingSnowman) && now < fastTrackingUntil
-        let needsScan = active && (fastTracking || now - lastScan >= (running || tracksWindows ? 0.082 : 0.21))
+        let allCovered = !screens.isEmpty && fullscreenDisplays.count == screens.count
+        let scanInterval = allCovered ? 0.30 : powerLimited ? 0.15 : (running || tracksWindows ? 0.082 : 0.21)
+        let needsScan = active && (studioChanged || fastTracking || now - lastScan >= scanInterval)
         let oldFrontWindow = windows.first(where: { !$0.widget })?.rect ?? .null
         var geometryChanged = false
         var shaken: [(id: UInt32, speed: CGFloat)] = []
@@ -783,6 +1300,18 @@ final class DesktopEngine {
                     shaken.append((window.id, fling))
                 }
             }
+        }
+
+        let hidden = settings.avoidFullscreen ? Set(screens.values.filter { screen in
+            windows.contains { !$0.widget && DesktopWeatherPower.fullscreen($0.rect, on: screen.frame) }
+        }.map(\.id)) : []
+        if hidden != fullscreenDisplays {
+            fullscreenDisplays = hidden
+            cancelActivity()
+            if model.pickingWindow { finishPicking(nil, reopen: false) }
+            if let display = workshopDisplay, hidden.contains(display) { cancelSnowman() }
+            if let dragSession, hidden.contains(dragSession.handle.display) { cancelOrnamentDrag() }
+            layoutDirty = true
         }
 
         let fullLayout = layoutDirty || changed
@@ -827,47 +1356,71 @@ final class DesktopEngine {
             updateBallHandles()
         }
 
-        let idleScene = model.preview || (model.idleActive && settings.idleSeconds > 0)
+        let idleScene = model.preview || (running && model.idleActive && settings.idleSeconds > 0)
         let canvasChanged = lastIdleScene != idleScene || lastCanvasReducedMotion != reducedMotion
             || lastSelection != model.selectedOrnament || (dayChanged && hasOrnaments)
         lastIdleScene = idleScene
         lastCanvasReducedMotion = reducedMotion
         lastSelection = model.selectedOrnament
-        let canSweep = tracksSnow && !idleScene && !mouseDown && !model.editMode && !model.pickingWindow && !model.buildingSnowman
-            && studio?.contains(pointer) != true
-        let behind = running && settings.layer == .behindWindows && !idleScene
-        let sceneTick = now - lastWeatherTick >= (1.0 / 30 - 0.002)
-        let weatherDelta = lastWeatherTick > 0 ? min(0.065, now - lastWeatherTick) : 1.0 / 30
+        let canSweep = tracksSnow && !idleScene && !mouseDown && !model.editMode && !model.pickingWindow
+            && !model.buildingSnowman && snowRollGesture == nil && lightDraft == nil && studio?.contains(pointer) != true
+        let behind = settings.layer == .behindWindows && !idleScene
+        let animatedDecorations = hasOrnaments && !reducedMotion && settings.ornaments.contains {
+            $0.kind == .tree || $0.kind == .lantern || $0.lightStrand != nil || ($0.kind == .lights && $0.lightMotion != .steady)
+        }
+        let rate: Double = powerLimited ? 20 : 30
+        let sceneTick = now - lastWeatherTick >= (1 / rate - 0.002)
+        let weatherDelta = lastWeatherTick > 0 ? min(0.090, now - lastWeatherTick) : 1 / rate
         if sceneTick { lastWeatherTick = now }
         let newFrontWindow = windows.first(where: { !$0.widget })?.rect ?? .null
-        let changedFlakeMask = geometryChanged && running && !idleScene && settings.layer == .behindFrontWindow
+        let changedFlakeMask = geometryChanged && !idleScene && settings.layer == .behindFrontWindow
             ? oldFrontWindow.areasOutside(newFrontWindow) + newFrontWindow.areasOutside(oldFrontWindow) : []
         for screen in screens.values {
-            let revealBack = behind && !screen.visibleBack
+            if hidden.contains(screen.id) {
+                screen.setVisibility(back: false, front: false)
+                continue
+            }
+            let showBack = behind && (running || !screen.sim.flakes.isEmpty)
+            let revealBack = showBack && !screen.visibleBack
             let revealFront = active && !screen.visibleFront
-            screen.setVisibility(back: behind, front: active)
+            screen.setVisibility(back: showBack, front: active)
             let size = screen.frame.size
             let hasFallingSnowmen = !screen.fallingSnowmen.isEmpty
             let plowWasPushing = !screen.plowedSnowmen.isEmpty || !screen.plowedDecorations.isEmpty
             let previousPlow = screen.sim.plow
-            let hasDebris = !screen.sim.released.isEmpty
             let hadFallingSnow = screen.sim.fallingSnowAnimating
+            let holidayWasActive = screen.festivities.active
+            let rollingWasActive = screen.rolledSnow.animating
+            let pointerLocal = screen.local(CGRect(origin: pointer, size: .zero)).origin
             let swept = canSweep && screen.frame.contains(pointer) && screen.sim.sweepSnow(
                 from: screen.local(CGRect(origin: previousPointer, size: .zero)).origin,
                 to: screen.local(CGRect(origin: pointer, size: .zero)).origin, delta: delta, reduced: reducedMotion)
-            if running && sceneTick {
+            let stepWeather = sceneTick && (running || screen.sim.weatherAnimating)
+            if stepWeather {
                 screen.sim.step(size: size, delta: weatherDelta, time: now,
-                                settings: settings, reduced: reducedMotion)
-            } else if !running && hasDebris {
-                screen.sim.stepDebris(size: size, delta: delta, accumulate: false)
+                                settings: settings, reduced: reducedMotion, emitting: running, lowPower: powerLimited)
             }
             if hadFallingSnow && tracksSnow { screen.sim.stepFallingSnow(delta: delta, reduced: reducedMotion) }
+            var rolledChanged = false
+            if rollingWasActive || sceneTick || needsLayout {
+                rolledChanged = screen.rolledSnow.advance(delta, size: size, snow: &screen.sim, reduced: reducedMotion)
+            }
+            screen.festivities.step(delta, size: size, snow: screen.sim,
+                                     automatic: settings.festiveVisits && running && !powerLimited
+                                        && screen.id == dockDisplays.first?.snowScreenID, reduced: reducedMotion)
+            if sceneTick {
+                updateTreeSnow(on: screen, delta: weatherDelta, pointer: pointerLocal,
+                               stirring: hypot(pointer.x - previousPointer.x, pointer.y - previousPointer.y) > 3
+                                   && !mouseDown && !model.editMode && studio?.contains(pointer) != true)
+            }
             var plowedRegions: [CGRect] = []
             if let floor = screen.sim.surfaces.first(where: \.floor)?.rect {
                 let contact = screen.sim.plow.map { SnowplowContact(pass: $0, previous: previousPlow, floor: floor) }
-                if running, sceneTick, settings.plowDestroysDecorations, let contact {
+                if stepWeather, settings.plowDestroysDecorations, let contact {
                     plowedRegions = collideDecorations(contact, floor: floor, on: screen)
+                    rolledChanged = screen.rolledSnow.contactPlow(contact) || rolledChanged
                 }
+                screen.rolledSnow.advancePlowed(delta, contact: contact, floor: floor, reduced: reducedMotion)
                 for index in screen.plowedSnowmen.indices.reversed() {
                     if !screen.plowedSnowmen[index].advance(delta, contact: contact, floor: floor, reduced: reducedMotion) {
                         screen.plowedSnowmen.remove(at: index)
@@ -881,18 +1434,20 @@ final class DesktopEngine {
             }
             for index in screen.fallingSnowmen.indices.reversed() {
                 if !screen.fallingSnowmen[index].advance(delta, scene: &screen.sim, limit: size.height,
-                                                         accumulate: running && settings.accumulate, reduced: reducedMotion) {
+                                                         accumulate: settings.accumulate, reduced: reducedMotion) {
                     screen.fallingSnowmen.remove(at: index)
                 }
             }
-            if behind && (sceneTick || changed || revealBack) {
+            if showBack && (stepWeather || changed || revealBack || canvasChanged) {
                 screen.backView.invalidate(moving: screen.sim.flakes.map(\.paintBounds), full: changed || revealBack || canvasChanged)
             }
             let fullFront = fullLayout || revealFront || canvasChanged
-            if active && (needsLayout || fullFront || sceneTick || hasDebris || hadFallingSnow || hasFallingSnowmen
-                          || plowWasPushing || workshop != nil || swept) {
-                let moving = movingFront(on: screen, weatherInFront: running && !behind, idleScene: idleScene)
-                var changedRegions = screen.changedSnow(showing: running)
+            let arrangingProp = snowRollGesture?.display == screen.id && snowRollGesture?.prop != nil
+            if active && (needsLayout || fullFront || stepWeather || (sceneTick && animatedDecorations) || hadFallingSnow || hasFallingSnowmen
+                          || plowWasPushing || workshop != nil || swept || rollingWasActive || rolledChanged || arrangingProp
+                          || holidayWasActive || screen.festivities.active) {
+                let moving = movingFront(on: screen, weatherInFront: !behind, idleScene: idleScene)
+                var changedRegions = screen.changedSnow(showing: settings.accumulate)
                 changedRegions += layoutRegions[screen.id] ?? []
                 changedRegions += changedFlakeMask.map(screen.local)
                 changedRegions += plowedRegions
@@ -904,6 +1459,55 @@ final class DesktopEngine {
             updateHandles(studio, showing: showingHandles)
             lastHandlesShowing = showingHandles
         }
+        if lightDraft != nil && pointer != previousPointer { refreshPickerGuides() }
+        if sceneTick || needsLayout { updateGiftHandles() }
+        monitorSnowPointer(active && canRollSnow && fullscreenDisplays.count < screens.count)
+        refreshSnowRollHandle(at: pointer)
+    }
+
+    private func updateTreeSnow(on screen: ScreenOverlay, delta: CGFloat, pointer: CGPoint, stirring: Bool) {
+        let trees = screen.placements.filter { $0.0.kind == .tree }
+        let present = Set(trees.map { $0.0.id })
+        screen.treeSnow = screen.treeSnow.filter { present.contains($0.key) }
+        let settings = model.settings
+        for (ornament, rect, target) in trees {
+            var snow = screen.treeSnow[ornament.id] ?? TreeBranchSnow()
+            snow.step(delta, density: model.running && settings.accumulate ? 0.32 + settings.intensity * 0.68 : 0)
+            let touches = rect.insetBy(dx: rect.width * 0.17, dy: rect.height * 0.16).contains(pointer)
+            let covered = target.map { window in windows.prefix { $0.id != window.id }.contains { screen.local($0.rect).contains(pointer) } } ?? false
+            if stirring && touches && !covered && settings.accumulate {
+                for (point, load) in snow.shake(at: pointer, in: rect) { screen.sim.shedBranchSnow(at: point, load: load) }
+            }
+            screen.treeSnow[ornament.id] = snow
+        }
+    }
+
+    private func updateGiftHandles() {
+        var present = Set<UUID>()
+        if snowRollGesture == nil && lightDraft == nil && !model.pickingWindow && !model.preview && !model.editMode {
+            let studio = presentedStudio()?.frame
+            for screen in screens.values where !fullscreenDisplays.contains(screen.id) {
+                for gift in screen.festivities.gifts where gift.openedAt == nil && gift.rest != nil {
+                    let frame = screen.global(gift.frame)
+                    guard studio?.intersects(frame) != true else { continue }
+                    present.insert(gift.id)
+                    let panel: OverlayPanel
+                    if let existing = giftHandles[gift.id]?.1 { panel = existing }
+                    else {
+                        panel = OverlayPanel(frame: frame, level: .init(rawValue: overlayLevel.rawValue + 1), interactive: true)
+                        let view = HandleView()
+                        view.setAccessibilityLabel("打开雪橇礼物")
+                        let id = gift.id
+                        view.up = { [weak screen] _ in screen?.festivities.open(id) }
+                        panel.contentView = view
+                        giftHandles[id] = (screen.id, panel)
+                    }
+                    if panel.frame != frame { panel.setFrame(frame, display: false) }
+                    if !panel.isVisible { panel.orderFrontRegardless() }
+                }
+            }
+        }
+        for id in Array(giftHandles.keys) where !present.contains(id) { giftHandles.removeValue(forKey: id)?.1.orderOut(nil) }
     }
 
     private func workshopPart(_ ball: WorkshopBall, in workshop: SnowmanWorkshop, on screen: ScreenOverlay) -> SnowmanPart {
@@ -963,10 +1567,17 @@ final class DesktopEngine {
         }
         if !reducedMotion {
             for (ornament, rect, _) in screen.placements
-            where ornament.kind == .lantern || (ornament.kind == .lights && ornament.lightMotion != .steady) {
-                rects.append(ornament.paintBounds(in: rect))
+            where ornament.kind == .lantern || ornament.lightStrand != nil || (ornament.kind == .lights && ornament.lightMotion != .steady) {
+                rects.append(ornament.lightStrand == nil ? ornament.paintBounds(in: rect) : rect)
             }
         }
+        for (ornament, rect, _) in screen.placements where ornament.kind == .tree && screen.treeSnow[ornament.id] != nil {
+            rects.append(ornament.paintBounds(in: rect))
+        }
+        if let flight = screen.festivities.flight { rects.append(flight.paintBounds(in: screen.frame.size)) }
+        rects += screen.festivities.gifts.map(\.bounds)
+        rects += screen.rolledSnow.balls.map(RolledSnowArt.bounds)
+        rects += screen.rolledSnow.plowed.map { RolledSnowArt.bounds(of: $0.ball) }
         if let pass = screen.sim.plow, let floor = screen.sim.surfaces.first(where: \.floor) {
             let x = floor.rect.minX + pass.bladeX(width: floor.rect.width)
             rects.append(CGRect(x: x - 108, y: floor.rect.minY - 82, width: 216, height: 87))
@@ -1107,6 +1718,13 @@ final class DesktopEngine {
         let mainScreen = NSScreen.screens.first?.snowScreenID
         if hasOrnaments {
             for ornament in model.settings.ornaments where ornament.id != workshopSource {
+                if let strand = ornament.lightStrand {
+                    let here = ornament.display == screen.id || (screens[ornament.display] == nil && screen.id == mainScreen)
+                    if here, ornament.id != lightDraft?.ornament?.id, strand.hooks.count > 1 {
+                        placements.append((ornament, strand.bounds(in: screen.frame.size, bulbScale: ornament.scale), nil))
+                    }
+                    continue
+                }
                 if let dragSession, let preview = dragSession.preview, dragSession.handle.ornament == ornament.id {
                     if preview.display == screen.id { draggedPlacement = (ornament, screen.local(preview.frame), nil) }
                     continue
@@ -1134,7 +1752,7 @@ final class DesktopEngine {
         if let draggedPlacement { placements.append(draggedPlacement) }
         screen.placements = placements
         var surfaces: [SnowSurface] = []
-        var covers = studio.map { [screen.local($0)] } ?? []
+        var covers: [CGRect] = []
         if let dock = dockFrames[screen.id] {
             let rect = screen.local(dock)
             let glassScale: CGFloat = if #available(macOS 26, *) { 0.38 } else { 0.25 }
@@ -1161,7 +1779,7 @@ final class DesktopEngine {
                 covers.append(rect)
             }
         }
-        for (ornament, rect, target) in placements where target == nil || ornament.kind != .lights {
+        for (ornament, rect, target) in placements where ornament.lightStrand == nil && (target == nil || ornament.kind != .lights) {
             let inset = rect.width * (ornament.kind == .calendar ? 0.04 : 0.27)
             let edge = CGRect(x: rect.minX + inset, y: rect.minY + rect.height * 0.13,
                               width: rect.width - 2 * inset, height: 4)
@@ -1183,6 +1801,7 @@ final class DesktopEngine {
             let path = CGMutablePath()
             path.addRect(bounds)
             path.addRect(rect.intersection(bounds))
+            ink.ctx.beginPath()
             ink.ctx.addPath(path)
             ink.ctx.clip(using: .evenOdd)
         }
@@ -1191,38 +1810,63 @@ final class DesktopEngine {
     private func paint(_ ink: Ink, screen: ScreenOverlay, isBack: Bool, dirty: CGRect) {
         let settings = model.settings
         let bounds = CGRect(origin: .zero, size: screen.frame.size)
-        let idleScene = model.preview || (model.idleActive && settings.idleSeconds > 0)
+        let idleScene = model.preview || (model.running && model.idleActive && settings.idleSeconds > 0)
         let now = CACurrentMediaTime()
         let motionTime = reducedMotion ? 0 : now
+        let studio = isBack ? nil : presentedStudio(at: now)
+        let studioSurface = studio.map { SurfaceID.window($0.id) }
+        func paintDrift(_ surface: SnowSurface) {
+            guard dirty.intersects(surface.paintBounds), let drift = screen.sim.drift(on: surface.id) else { return }
+            ink.ctx.saveGState()
+            outside(surface.occluders, bounds: bounds, ink: ink)
+            SnowArt.drift(drift, on: surface, icicles: settings.icicles, ink: ink)
+            ink.ctx.restoreGState()
+        }
         ink.ctx.saveGState()
-        if !isBack, let frame = studioFrame?() { outside([screen.local(frame)], bounds: bounds, ink: ink) }
+        if let studio { outside([screen.local(studio.frame)], bounds: bounds, ink: ink) }
         if !isBack && model.running && idleScene && settings.idleDim { ink.fill(bounds, 0x071526, alpha: 0.30) }
-        if model.running {
+        if !screen.sim.flakes.isEmpty {
             ink.ctx.saveGState()
             if isBack {
-                paintFlakes(screen.sim.flakes, ink: ink, dirty: dirty)
+                paintFlakes(screen.sim.flakes, ink: ink, dirty: dirty, crystalMix: settings.crystalMix, time: motionTime)
             } else if settings.layer != .behindWindows || idleScene {
                 if settings.layer == .behindFrontWindow && !idleScene,
                    let front = windows.first(where: { !$0.widget }) {
                     outside([screen.local(front.rect)], bounds: bounds, ink: ink)
                 }
-                paintFlakes(screen.sim.flakes, ink: ink, dirty: dirty)
+                paintFlakes(screen.sim.flakes, ink: ink, dirty: dirty, crystalMix: settings.crystalMix, time: motionTime)
             }
             ink.ctx.restoreGState()
         }
 
         if !isBack {
             for (ornament, rect, target) in screen.placements {
-                guard dirty.intersects(ornament.paintBounds(in: rect)) else { continue }
+                let paintBounds = ornament.lightStrand == nil ? ornament.paintBounds(in: rect) : rect
+                guard dirty.intersects(paintBounds) else { continue }
                 ink.ctx.saveGState()
                 if let target {
                     let nearer = windows.prefix { $0.id != target.id }
                     outside(nearer.map { screen.local($0.rect) }, bounds: bounds, ink: ink)
                 }
-                if target != nil && ornament.kind == .lights {
+                if ornament.lightStrand != nil {
+                    let pointer = screen.local(CGRect(origin: NSEvent.mouseLocation, size: .zero)).origin
+                    DecorationArt.freeLights(ornament, screen: bounds.size, brush: pointer,
+                                             wind: settings.wind, ink: ink, time: motionTime)
+                } else if target != nil && ornament.kind == .lights {
                     DecorationArt.windowLights(ornament, rect: rect, ink: ink, time: motionTime)
                 } else {
-                    DecorationArt.draw(ornament, in: rect, with: ink, time: motionTime, now: Date())
+                    var pose = ornament
+                    let branchSnow = settings.accumulate ? screen.treeSnow[ornament.id] : nil
+                    if !reducedMotion { pose.rotation += Double(branchSnow?.rotation ?? 0) }
+                    DecorationArt.draw(pose, in: rect, with: ink, time: motionTime, now: Date())
+                    if let branchSnow {
+                        ink.ctx.saveGState()
+                        ink.ctx.translateBy(x: rect.midX, y: rect.midY)
+                        ink.ctx.rotate(by: pose.rotation * .pi / 180)
+                        ink.ctx.translateBy(x: -rect.midX, y: -rect.midY)
+                        branchSnow.paint(in: rect, ink: ink)
+                        ink.ctx.restoreGState()
+                    }
                     if model.editMode && model.selectedOrnament == ornament.id {
                         ink.ctx.setStrokeColor(NSColor(rgb: 0x9aeeff, alpha: 0.64).cgColor)
                         ink.ctx.setLineWidth(1)
@@ -1233,13 +1877,9 @@ final class DesktopEngine {
                 }
                 ink.ctx.restoreGState()
             }
-            if model.running {
-                for surface in screen.sim.surfaces where dirty.intersects(surface.paintBounds) {
-                    guard let drift = screen.sim.drift(on: surface.id) else { continue }
-                    ink.ctx.saveGState()
-                    outside(surface.occluders, bounds: bounds, ink: ink)
-                    SnowArt.drift(drift, on: surface, icicles: settings.icicles, ink: ink)
-                    ink.ctx.restoreGState()
+            if settings.accumulate {
+                for surface in screen.sim.surfaces where surface.id != studioSurface {
+                    paintDrift(surface)
                 }
                 if let pass = screen.sim.plow, let floor = screen.sim.surfaces.first(where: \.floor) {
                     SnowplowArt.draw(pass, on: floor, ink: ink)
@@ -1264,6 +1904,18 @@ final class DesktopEngine {
                 ink.ctx.restoreGState()
             }
             paintFlakes(screen.sim.released, ink: ink, dirty: dirty)
+            for wreck in screen.rolledSnow.plowed where dirty.intersects(RolledSnowArt.bounds(of: wreck.ball)) {
+                RolledSnowArt.draw(wreck.ball, reduced: reducedMotion, ink: ink)
+            }
+            for ball in screen.rolledSnow.paintedBalls where ball.mass > 0 && dirty.intersects(RolledSnowArt.bounds(of: ball)) {
+                RolledSnowArt.draw(ball, reduced: reducedMotion, ink: ink)
+            }
+            if let pass = screen.festivities.flight, dirty.intersects(pass.paintBounds(in: bounds.size)) {
+                FestiveTrafficArt.draw(pass, in: bounds.size, reduced: reducedMotion, ink: ink)
+            }
+            for gift in screen.festivities.gifts where dirty.intersects(gift.bounds) {
+                FestiveTrafficArt.draw(gift, reduced: reducedMotion, ink: ink)
+            }
             if let workshop {
                 let source = settings.ornaments.first { $0.id == workshopSource }
                 for ball in workshop.balls where workshop.revealed(ball.id) {
@@ -1281,19 +1933,27 @@ final class DesktopEngine {
             }
         }
         ink.ctx.restoreGState()
+        // Only the settings window's own snow can wrap over its title bar and corners.
+        if settings.accumulate, let studioSurface, let edge = screen.sim.surfaces.first(where: { $0.id == studioSurface }) {
+            paintDrift(edge)
+        }
     }
 
     private func workshopHint(in bounds: CGRect) -> CGRect {
         CGRect(x: bounds.midX - 158, y: 46, width: 316, height: 30)
     }
 
-    private func paintFlakes(_ flakes: [Flake], ink: Ink, dirty: CGRect) {
+    private func paintFlakes(_ flakes: [Flake], ink: Ink, dirty: CGRect, crystalMix: CGFloat = 0, time: Double = 0) {
         guard !flakes.isEmpty else { return }
         let buckets = (0..<8).map { _ in CGMutablePath() }
         let halos = CGMutablePath()
         for flake in flakes where dirty.intersects(flake.paintBounds) {
             let opacity = (0.26 + flake.depth * 0.61) * flake.opacity
             let radius = flake.radius
+            if flake.crystal < crystalMix, radius >= 1.5 {
+                IceCrystalArt.draw(flake, at: time, opacity: opacity, ink: ink)
+                continue
+            }
             let index = min(7, max(0, Int(opacity * 8)))
             buckets[index].addEllipse(in: CGRect(x: flake.x - radius, y: flake.y - radius,
                                                  width: 2 * radius, height: 2 * radius))
@@ -1320,8 +1980,8 @@ final class DesktopEngine {
             let grabbed = dragSession?.handle
             // AppKit continues sending drag events to the panel that received mouse-down.
             if let grabbed { present.insert(grabbed) }
-            for screen in screens.values {
-                for (ornament, rect, target) in screen.placements where ornament.id != grabbed?.ornament {
+            for screen in screens.values where !fullscreenDisplays.contains(screen.id) {
+                for (ornament, rect, target) in screen.placements where ornament.id != grabbed?.ornament && ornament.lightStrand == nil {
                     let frame = screen.global(rect)
                     let mountedLights = target != nil && ornament.kind == .lights
                     let regions = mountedLights ? DecorationArt.windowLightHitRegions(ornament, in: rect)

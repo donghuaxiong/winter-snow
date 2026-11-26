@@ -15,6 +15,44 @@ internal struct SnowGrain
 {
     public Vector2 Position, Velocity;
     public float Radius, Mass, Life;
+    public float Angle;
+    public SnowCornerSlide? Slide;
+
+    public float ClumpWidth => Math.Min(13, 6 + Mass * .75f);
+    public Vector2 Contact
+    {
+        get
+        {
+            if (Slide is null) return Position + new Vector2(0, Radius * .6f);
+            float along = ClumpWidth / 2 * MathF.Sin(Angle);
+            float across = Radius * MathF.Cos(Angle);
+            return Position + new Vector2(0, MathF.Sqrt(along * along + across * across));
+        }
+    }
+}
+
+internal sealed class SnowCornerSlide(Shelf source, bool left, bool reducedMotion)
+{
+    public readonly Shelf Source = source;
+    public readonly float Direction = left ? -1 : 1;
+    private readonly float duration = reducedMotion ? .16f : .31f;
+    private float elapsed;
+
+    public bool Rolling => elapsed < duration;
+    public bool Exposed => left ? Source.LeftOverflow : Source.RightOverflow;
+    private float Edge => left ? Source.Frame.Left : Source.Frame.Right;
+
+    public Vector2 Position(float depth, out float turn)
+    {
+        float progress = elapsed / duration;
+        turn = (.64f * progress + .36f * progress * progress) * MathF.PI / 2;
+        float radius = Source.Radius;
+        float shell = radius + depth * .48f;
+        return new Vector2(Edge + Direction * (shell * MathF.Sin(turn) - radius), Source.Frame.Top + radius - shell * MathF.Cos(turn));
+    }
+
+    public void Advance(float delta) => elapsed = Math.Min(duration, elapsed + delta);
+    public void Release() => elapsed = duration;
 }
 
 internal sealed class SnowScene
@@ -29,6 +67,7 @@ internal sealed class SnowScene
     private int nextPlowDirection = 1;
     private float settleClock, cooldown, weatherTime;
     private float powderLoad, ambientClock;
+    private bool hasEmittedSnow;
     private readonly Box viewport;
 
     public MonitorInfo Monitor { get; }
@@ -99,8 +138,13 @@ internal sealed class SnowScene
                 shelf.Radius = frame.Width >= viewport.Width && frame.Top <= 1 ? 0 : window.CornerRadius;
                 List<Span> visible = Shelf.Exposed(frame, viewport, nearer);
                 if (!shelf.Visible.SequenceEqual(visible)) shelf.Visible = visible;
+                shelf.LeftOverflow = CanOverflow(shelf, true);
+                shelf.RightOverflow = CanOverflow(shelf, false);
                 shelf.Snow.Resize(frame.Width);
                 if (shelf.Visible.Count > 0) shelves.Add(shelf);
+
+                bool CanOverflow(Shelf owner, bool left) => owner.OverflowRoute(left, viewport, floorY) is { } route &&
+                    !nearer.Exists(cover => cover.Intersect(route).HasArea);
             }
             if (!window.Taskbar) nearer.Add(frame);
         }
@@ -160,36 +204,39 @@ internal sealed class SnowScene
         cooldown = 1;
     }
 
+    public void StopAirborneFlakes() => flakes.Clear();
+
     public void Step(float delta, SnowOptions options, bool snowing, bool reducedMotion, Vector2? previousMouse, Vector2? mouse)
     {
         ShowIcicles = options.Icicles && options.Accumulation;
-        if (snowing)
+        if (snowing || flakes.Count > 0)
         {
             weatherTime += delta;
-            FlyFlakes(delta, options, reducedMotion);
-            if (options.Accumulation)
+            FlyFlakes(delta, options, reducedMotion, emitting: snowing);
+        }
+        if (snowing && options.Accumulation)
+        {
+            ambientClock += delta;
+            if (options.Density > 0 && ambientClock >= .07f)
             {
-                ambientClock += delta;
-                if (options.Density > 0 && ambientClock >= .07f)
-                {
-                    ambientClock -= .07f;
-                    int samples = Math.Clamp((int)(Monitor.Width / 510), 1, 6);
-                    for (int i = 0; i < samples; i++)
-                        floor.Snow.Land(Range(0, Monitor.Width), (.85f + options.Density * 1.7f) * (reducedMotion ? 1.1f : 1));
-                }
-                else if (options.Density == 0) ambientClock = 0;
-                if (previousMouse is { } from && mouse is { } to && !reducedMotion)
-                    Sweep(from, to, delta);
+                ambientClock -= .07f;
+                int samples = Math.Clamp((int)(Monitor.Width / 510), 1, 6);
+                for (int i = 0; i < samples; i++)
+                    floor.Snow.Land(Range(0, Monitor.Width), (.85f + options.Density * 1.7f) * (reducedMotion ? 1.1f : 1));
             }
+            else if (options.Density == 0) ambientClock = 0;
+            if (previousMouse is { } from && mouse is { } to && !reducedMotion)
+                Sweep(from, to, delta);
         }
 
-        if (options.Accumulation)
+        if (options.Accumulation && (snowing || flakes.Count > 0 || grains.Count > 0 || Plow is not null))
         {
             settleClock += delta;
             if (settleClock > .18f)
             {
                 settleClock = 0;
                 foreach (Shelf shelf in shelves) shelf.Snow.Settle();
+                if (snowing) SpillWindowCorners(reducedMotion);
             }
 
             if (cooldown > 0) cooldown -= delta;
@@ -198,7 +245,7 @@ internal sealed class SnowScene
         }
 
         Person?.Step(delta, Monitor.Width, FloorY, reducedMotion);
-        StepGrains(delta, options.Accumulation);
+        StepGrains(delta, options.Accumulation, reducedMotion);
         if (Plow is { } pass)
         {
             StepPlow(delta, pass, reducedMotion);
@@ -228,29 +275,40 @@ internal sealed class SnowScene
         return false;
     }
 
-    private void FlyFlakes(float delta, SnowOptions options, bool reducedMotion)
+    private void FlyFlakes(float delta, SnowOptions options, bool reducedMotion, bool emitting)
     {
-        int target = (int)Math.Clamp(Monitor.Width * Monitor.Height / 4400 * options.Density * 1.70f, 0, 730);
-        if (reducedMotion) target /= 3;
-        while (flakes.Count < target) flakes.Add(NewFlake(scattered: true));
-        if (flakes.Count > target) flakes.RemoveRange(target, flakes.Count - target);
+        if (emitting)
+        {
+            int target = (int)Math.Clamp(Monitor.Width * Monitor.Height / 4400 * options.Density * 1.70f, 0, 730);
+            if (reducedMotion) target /= 3;
+            if (flakes.Count > target) flakes.RemoveRange(target, flakes.Count - target);
+            int missing = target - flakes.Count;
+            int count = hasEmittedSnow ? Math.Min(missing, 32) : missing;
+            for (int i = 0; i < count; i++) flakes.Add(NewFlake(scattered: !hasEmittedSnow));
+            hasEmittedSnow |= count > 0;
+        }
 
+        int remaining = 0;
         for (int i = 0; i < flakes.Count; i++)
         {
             Flake flake = flakes[i];
+            if (!emitting && flake.Position.Y + flake.Radius < 0) continue;
             Vector2 old = flake.Position;
             float sway = reducedMotion ? 0 : 14 * MathF.Sin(weatherTime * .84f + flake.Phase);
             flake.Position += new Vector2((options.Wind * 56 + sway) * delta, flake.Speed * (.30f + options.Speed * 1.25f) * delta);
             if (flake.Position.X < -8) flake.Position.X += Monitor.Width + 16;
             if (flake.Position.X > Monitor.Width + 8) flake.Position.X -= Monitor.Width + 16;
-            if (options.Accumulation && FindLanding(old.Y, flake.Position, out Shelf? shelf))
+            Shelf? shelf = null;
+            if (options.Accumulation) FindLanding(old.Y, flake.Position, out shelf);
+            if (shelf is not null) shelf.Snow.Land(flake.Position.X - shelf.Frame.Left, .36f + .65f * flake.Radius);
+            if (shelf is not null || flake.Position.Y > FloorY + 8)
             {
-                shelf!.Snow.Land(flake.Position.X - shelf.Frame.Left, .36f + .65f * flake.Radius);
+                if (!emitting) continue;
                 flake = NewFlake(scattered: false);
             }
-            else if (flake.Position.Y > FloorY + 8) flake = NewFlake(scattered: false);
-            flakes[i] = flake;
+            flakes[remaining++] = flake;
         }
+        if (remaining < flakes.Count) flakes.RemoveRange(remaining, flakes.Count - remaining);
     }
 
     private Flake NewFlake(bool scattered)
@@ -266,13 +324,13 @@ internal sealed class SnowScene
         };
     }
 
-    private bool FindLanding(float oldY, Vector2 point, out Shelf? support)
+    private bool FindLanding(float oldY, Vector2 point, out Shelf? support, Shelf? source = null)
     {
         float lowestY = float.MaxValue;
         support = null;
         foreach (Shelf shelf in shelves)
         {
-            if (shelf.Frame.Top - 25 > point.Y || !shelf.Supports(point.X)) continue;
+            if (shelf == source || shelf.Frame.Top - 25 > point.Y || !shelf.Supports(point.X)) continue;
             float snowTop = shelf.TopAt(point.X) - shelf.Snow.At(point.X - shelf.Frame.Left);
             if (oldY > snowTop + 2 || point.Y < snowTop || snowTop >= lowestY) continue;
             lowestY = snowTop;
@@ -281,19 +339,73 @@ internal sealed class SnowScene
         return support is not null;
     }
 
-    private void StepGrains(float delta, bool collect)
+    private void SpillWindowCorners(bool reducedMotion)
+    {
+        foreach (Shelf shelf in shelves)
+        {
+            if (grains.Count >= 500) return;
+            if (shelf.IsFloor) continue;
+            for (int side = 0; side < 2; side++)
+            {
+                bool left = side == 0;
+                if (!(left ? shelf.LeftOverflow : shelf.RightOverflow)) continue;
+                if (SettingsCover is { } cover && shelf.OverflowRoute(left, viewport, FloorY) is { } route && cover.Intersect(route).HasArea)
+                    continue;
+                float mass = shelf.Snow.SpillFromCorner(left, weatherTime);
+                if (mass <= 0) continue;
+                var slide = new SnowCornerSlide(shelf, left, reducedMotion);
+                float width = Math.Min(13, 6 + mass * .75f);
+                float thickness = Math.Clamp(mass * 6 / width * .86f, 2.5f, 5.2f);
+                AddGrain(new SnowGrain
+                {
+                    Position = slide.Position(thickness, out _),
+                    Velocity = new Vector2(slide.Direction * Range(14, 27), 65),
+                    Radius = thickness / 2, Mass = mass, Life = 7, Slide = slide
+                });
+                break;
+            }
+        }
+    }
+
+    private void StepGrains(float delta, bool collect, bool reducedMotion)
     {
         for (int i = grains.Count - 1; i >= 0; i--)
         {
             SnowGrain grain = grains[i];
-            float oldY = grain.Position.Y;
-            grain.Velocity.Y += 570 * delta;
-            grain.Position += grain.Velocity * delta;
-            grain.Life -= delta;
-            if (collect && grain.Velocity.Y >= 0 && grain.Mass > 0 &&
-                FindLanding(oldY + grain.Radius * .6f, grain.Position + new Vector2(0, grain.Radius * .6f), out Shelf? landing))
+            var slide = grain.Slide;
+            float oldY = grain.Contact.Y;
+            bool rolling = slide is { Rolling: true, Exposed: true } && shelves.Contains(slide.Source);
+            if (rolling)
             {
-                landing!.Snow.Land(grain.Position.X - landing.Frame.Left, grain.Mass);
+                slide!.Advance(delta);
+                grain.Position = slide.Position(grain.Radius * 2, out float turn);
+                if (!reducedMotion) grain.Angle = slide.Direction * turn;
+                if (!slide.Rolling) oldY = Math.Min(oldY, slide.Source.Frame.Top);
+            }
+            else
+            {
+                slide?.Release();
+                grain.Velocity.Y += 570 * delta;
+                grain.Position += grain.Velocity * delta;
+                if (slide is not null)
+                {
+                    if (!reducedMotion) grain.Angle += slide.Direction * 1.8f * delta;
+                    grain.Position.X = Math.Clamp(grain.Position.X, 1, Math.Max(1, viewport.Width - 1));
+                }
+            }
+            grain.Life -= delta;
+            Vector2 contact = grain.Contact;
+            if (collect && slide?.Rolling != true && grain.Velocity.Y >= 0 && grain.Mass > 0 &&
+                FindLanding(oldY, contact, out Shelf? landing, slide?.Source))
+            {
+                float x = contact.X - landing!.Frame.Left;
+                if (slide is null) landing.Snow.Land(x, grain.Mass);
+                else landing.Snow.DepositClump(x, grain.Mass);
+                grains.RemoveAt(i);
+            }
+            else if (collect && slide is { Rolling: false } && contact.Y >= FloorY - floor.Snow.At(contact.X))
+            {
+                floor.Snow.DepositClump(contact.X, grain.Mass);
                 grains.RemoveAt(i);
             }
             else if (grain.Position.Y > FloorY + 12 || grain.Position.X < -50 || grain.Position.X > Monitor.Width + 50 || grain.Life <= 0)

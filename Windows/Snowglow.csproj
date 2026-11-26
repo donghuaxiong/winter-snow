@@ -9,7 +9,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>Snowglow</AssemblyName>
     <RootNamespace>Snowglow.Windows</RootNamespace>
-    <Version>0.2.0</Version>
+    <Version>0.2.2</Version>
     <Product>Snowglow Windows</Product>
     <ApplicationIcon>Assets/Snowglow.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>

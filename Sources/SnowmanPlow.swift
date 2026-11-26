@@ -20,10 +20,14 @@ struct SnowplowContact {
     }
 
     func hits(_ part: SnowmanPart) -> Bool {
+        hits(part.center, radius: part.radius)
+    }
+
+    func hits(_ center: CGPoint, radius: CGFloat) -> Bool {
         guard !hitArea.isEmpty else { return false }
-        let closestX = min(hitArea.maxX, max(hitArea.minX, part.center.x))
-        let closestY = min(hitArea.maxY, max(hitArea.minY, part.center.y))
-        return hypot(part.center.x - closestX, part.center.y - closestY) <= part.radius
+        let closestX = min(hitArea.maxX, max(hitArea.minX, center.x))
+        let closestY = min(hitArea.maxY, max(hitArea.minY, center.y))
+        return hypot(center.x - closestX, center.y - closestY) <= radius
     }
 
     func hits(_ rect: CGRect) -> Bool { hitArea.intersects(rect) }

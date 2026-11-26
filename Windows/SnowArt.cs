@@ -27,7 +27,7 @@ internal static class SnowArt
         Color.FromRgb(251, 253, 255), Color.FromRgb(170, 198, 226), 90));
     private static readonly Brush BallFill = BuildBallFill();
 
-    public static void Paint(DrawingContext context, SnowScene scene, bool showFlakes, bool dim, double time)
+    public static void Paint(DrawingContext context, SnowScene scene, bool dim, double time)
     {
         Rect viewport = new(0, 0, scene.Monitor.Width, scene.Monitor.Height);
 
@@ -36,12 +36,12 @@ internal static class SnowArt
         if (scene.SettingsCover is { } settings) { ClipOutside(context, viewport, settings); clips++; }
         if (dim) context.DrawRectangle(Ink(0x4D071526), null, viewport);
 
-        if (showFlakes)
+        if (scene.Flakes.Count > 0)
         {
             foreach (Box window in scene.FlakeCovers) ClipOutside(context, viewport, window);
             foreach (Flake flake in scene.Flakes)
             {
-                if (flake.Position.Y < 0 || flake.Position.Y > viewport.Bottom) continue;
+                if (flake.Position.Y + flake.Radius < 0 || flake.Position.Y - flake.Radius > viewport.Bottom) continue;
                 int shade = Math.Clamp((int)(flake.Opacity * 10), 0, FlakeInk.Length - 1);
                 context.DrawEllipse(FlakeInk[shade], null, PointAt(flake.Position), flake.Radius, flake.Radius);
             }
@@ -66,9 +66,25 @@ internal static class SnowArt
         foreach (PushedSnowperson wreck in scene.Wrecks)
             DrawSnowperson(context, wreck.Person, showShadow: false);
         foreach (SnowGrain grain in scene.Grains)
-            context.DrawEllipse(Powder, null, PointAt(grain.Position), grain.Radius, grain.Radius * .86);
+        {
+            if (grain.Slide is null)
+                context.DrawEllipse(Powder, null, PointAt(grain.Position), grain.Radius, grain.Radius * .86);
+            else DrawCornerClump(context, grain);
+        }
 
         for (int i = 0; i < clips; i++) context.Pop();
+    }
+
+    private static void DrawCornerClump(DrawingContext context, SnowGrain grain)
+    {
+        double half = grain.ClumpWidth / 2;
+        double radius = grain.Radius;
+        context.PushTransform(new TranslateTransform(grain.Position.X, grain.Position.Y));
+        if (grain.Angle != 0) context.PushTransform(new RotateTransform(grain.Angle * 180 / Math.PI));
+        context.DrawEllipse(SnowBank, null, new Point(-half * .14, 0), half * .85, radius);
+        context.DrawEllipse(SnowBank, null, new Point(half * .54, radius * .12), half * .46, radius * .72);
+        if (grain.Angle != 0) context.Pop();
+        context.Pop();
     }
 
     private static void DrawIcicles(DrawingContext context, Shelf shelf)
