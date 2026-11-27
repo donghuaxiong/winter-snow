@@ -20,6 +20,13 @@ enum SnowballAtlas {
         ctx.draw(image, in: CGRect(origin: .zero, size: rect.size))
         ctx.restoreGState()
     }
+
+    // Cropping an ImageIO image can defer decoding until the first draw.
+    static func rasterized(_ image: CGImage) -> CGImage {
+        WinterArtwork.bitmap(width: image.width, height: image.height) { ink in
+            draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height), ink: ink)
+        } ?? image
+    }
 }
 
 enum RolledSnowArt {
@@ -27,9 +34,13 @@ enum RolledSnowArt {
         CGRect(x: 20, y: 279, width: 478, height: 491),
         CGRect(x: 527, y: 280, width: 479, height: 489),
         CGRect(x: 1032, y: 281, width: 487, height: 485)
-    ], from: "RolledSnowballs")
+    ], from: "RolledSnowballs").map { $0.map(SnowballAtlas.rasterized) }
 
     static var photosAvailable: Bool { photos.allSatisfy { $0 != nil } }
+
+    static func preload() {
+        DispatchQueue.global(qos: .utility).async { _ = photosAvailable }
+    }
 
     private static let shadow = CGGradient(
         colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
@@ -57,7 +68,7 @@ enum RolledSnowArt {
         ctx.saveGState()
         ctx.translateBy(x: ball.center.x, y: ball.center.y + radius * squeeze * 0.13)
         ctx.scaleBy(x: 1 + 0.10 * squeeze, y: 1 - 0.17 * squeeze)
-        let variant = Int(ball.id.uuid.0) % photos.count
+        let variant = Int(ball.textureSeed) % photos.count
         if let photo = photos[variant] {
             ctx.rotate(by: ball.rotation.remainder(dividingBy: .pi * 2))
             SnowballAtlas.draw(photo, in: CGRect(around: .zero, radius: radius * 1.028), ink: ink)

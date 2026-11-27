@@ -129,10 +129,19 @@ enum SleighFlightArt {
         guard let full = parts[0], let thigh = parts[1], let shoulder = parts[2], let hoof = parts[3],
               let sleigh = SnowballAtlas.crops([CGRect(x: 27, y: 7, width: 1470, height: 1008)], from: "FestiveFlightSleigh")[0],
               let body = maskedTorso(full) else { return nil }
-        return Sprites(sleigh: sleigh, body: body, thigh: thigh, shoulder: shoulder, hoof: hoof)
+        return Sprites(sleigh: SnowballAtlas.rasterized(sleigh), body: body,
+                       thigh: SnowballAtlas.rasterized(thigh), shoulder: SnowballAtlas.rasterized(shoulder),
+                       hoof: SnowballAtlas.rasterized(hoof))
     }()
 
     static var spritesAvailable: Bool { sprites != nil }
+
+    static func preload(then completion: (@MainActor @Sendable () -> Void)? = nil) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = spritesAvailable
+            if let completion { DispatchQueue.main.async { completion() } }
+        }
+    }
 
     private static func maskedTorso(_ original: CGImage) -> CGImage? {
         let reduced = CGRect(x: 0, y: 0, width: 1152, height: 768)
@@ -196,6 +205,7 @@ enum SleighFlightArt {
         let ctx = ink.ctx
         ctx.saveGState()
         defer { ctx.restoreGState() }
+        ctx.clip(to: pass.paintBounds(in: size))
         ctx.translateBy(x: pass.direction > 0 ? frame.minX : frame.maxX, y: frame.minY)
         ctx.scaleBy(x: pass.direction, y: 1)
 

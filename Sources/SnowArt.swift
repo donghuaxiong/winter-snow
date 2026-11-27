@@ -282,6 +282,7 @@ enum SnowArt {
                     shape.addQuadCurve(to: p(x + width, y - 0.5), control: p(x + width * 0.52, y + drop * 0.64))
                     shape.closeSubpath()
                     ink.ctx.saveGState()
+                    ink.ctx.clip(to: shape.boundingBoxOfPath)
                     ink.ctx.addPath(shape)
                     ink.ctx.clip()
                     ink.ctx.setAlpha(0.79)

@@ -4,9 +4,8 @@ import Darwin
 
 /// The Dock may be omitted from WindowServer's public list. Its work-area inset
 /// still describes the reserved edge, even when its window number is unavailable.
-@MainActor
-struct DesktopDock {
-    enum Edge: String { case bottom, left, right }
+struct DesktopDock: Sendable {
+    enum Edge: String, Sendable { case bottom, left, right }
 
     private typealias SystemRectReader = @convention(c) (UnsafeMutablePointer<CGRect>) -> Void
     private static let systemRectReader: SystemRectReader? = {
@@ -32,7 +31,12 @@ struct DesktopDock {
     private let dockPID: Int32?
     private let measured: CGRect?
 
+    @MainActor
     init(primaryTop: CGFloat) {
+        self.init(primaryTop: primaryTop, displayFrames: NSScreen.screens.map(\.frame))
+    }
+
+    init(primaryTop: CGFloat, displayFrames: [CGRect]) {
         let domain = "com.apple.dock" as CFString
         func preference(_ key: String) -> Any? { CFPreferencesCopyAppValue(key as CFString, domain) }
         edge = (preference("orientation") as? String).flatMap(Edge.init(rawValue:)) ?? .bottom
@@ -55,9 +59,10 @@ struct DesktopDock {
         separators = recentIDs.isEmpty ? 1 : 2
         dockPID = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier
 
-        measured = Self.visibleBounds(primaryTop: primaryTop, edge: edge)
+        measured = Self.visibleBounds(primaryTop: primaryTop, edge: edge, displays: displayFrames)
     }
 
+    @MainActor
     func frame(on screen: NSScreen) -> CGRect? {
         let display = screen.frame
         if let measured, display.contains(p(measured.midX, measured.midY)) { return measured }
@@ -72,6 +77,7 @@ struct DesktopDock {
         return estimate
     }
 
+    @MainActor
     func liveFrame(primaryTop: CGFloat, displays: [NSScreen], hitBounds: inout DockHitBounds) -> (UInt32, CGRect)? {
         guard let read = Self.systemRectReader else { return nil }
         var raw = CGRect.zero
@@ -117,6 +123,7 @@ struct DesktopDock {
         }
     }
 
+    @MainActor
     func calibrate(_ bounds: CGRect, on screen: NSScreen) -> Bool {
         let canvas = CGRect(origin: .zero, size: screen.frame.size)
         guard canvas.contains(bounds), let estimate = estimatedFrame(on: screen),
@@ -127,12 +134,14 @@ struct DesktopDock {
         return true
     }
 
+    @MainActor
     private func calibrationKey(on screen: NSScreen) -> String {
         let uuid = CGDisplayCreateUUIDFromDisplayID(screen.snowScreenID)?.takeRetainedValue()
         let id = uuid.map { CFUUIDCreateString(nil, $0) as String } ?? String(screen.snowScreenID)
         return "snowglow-dock-bounds-\(id)-\(edge.rawValue)"
     }
 
+    @MainActor
     private func estimatedFrame(on screen: NSScreen) -> CGRect? {
         let display = screen.frame
         let safe = screen.visibleFrame
@@ -153,6 +162,7 @@ struct DesktopDock {
         return CGRect(x: display.midX - extent / 2, y: display.minY + gap, width: extent, height: thickness)
     }
 
+    @MainActor
     private func workAreaInset(on screen: NSScreen) -> CGFloat {
         let display = screen.frame
         let safe = screen.visibleFrame
@@ -163,9 +173,8 @@ struct DesktopDock {
         }
     }
 
-    private static func visibleBounds(primaryTop: CGFloat, edge: Edge) -> CGRect? {
+    private static func visibleBounds(primaryTop: CGFloat, edge: Edge, displays: [CGRect]) -> CGRect? {
         let docks = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock")
-        let displays = NSScreen.screens.map(\.frame)
         func isDockShape(_ bounds: CGRect) -> Bool {
             let thin = edge == .bottom ? bounds.height : bounds.width
             let long = edge == .bottom ? bounds.width : bounds.height

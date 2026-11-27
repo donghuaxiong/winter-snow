@@ -1,7 +1,7 @@
 import AppKit
 import QuartzCore
 
-struct DesktopWindow: Equatable {
+struct DesktopWindow: Equatable, Sendable {
     var id: UInt32
     var pid: Int32
     var owner: String
@@ -12,22 +12,10 @@ struct DesktopWindow: Equatable {
         WindowAnchor(id: id, owner: owner, pid: pid, x: rect.midX, y: rect.midY)
     }
 
-    static func presentedFrame(of windowNumber: Int, primaryTop: CGFloat) -> CGRect? {
-        guard let number = UInt32(exactly: windowNumber), number > 0,
-              let info = (CGWindowListCopyWindowInfo(.optionIncludingWindow, number)
-                as? [[String: Any]])?.first,
-              (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value == number,
-              info[kCGWindowIsOnscreen as String] as? Bool == true,
-              (info[kCGWindowAlpha as String] as? Double ?? 0) > 0.15,
-              let rawBounds = info[kCGWindowBounds as String] as? NSDictionary,
-              let bounds = CGRect(dictionaryRepresentation: rawBounds as CFDictionary), !bounds.isEmpty else { return nil }
-        return CGRect(x: bounds.minX, y: primaryTop - bounds.maxY, width: bounds.width, height: bounds.height)
-    }
-
     static func onscreen(primaryTop: CGFloat, ignoring pid: Int32, includingOwnWindow ownWindow: UInt32? = nil,
-                         stageDisplays: [CGRect] = []) -> [Self] {
-        let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-            as? [[String: Any]] ?? []
+                         stageDisplays: [CGRect] = []) -> [Self]? {
+        guard let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return nil }
         return entries.compactMap { entry in
             guard let id = (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
                   let ownerPID = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,

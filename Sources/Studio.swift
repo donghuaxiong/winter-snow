@@ -565,6 +565,7 @@ struct StudioView: View {
                 .buttonStyle(StudioButton())
             }
             .surface()
+            collectedSnowmen
             HStack {
                 Button("拖雪球堆人…") { model.startSnowman?() }
                     .buttonStyle(StudioButton(prominent: true))
@@ -629,6 +630,44 @@ struct StudioView: View {
 
     private var selectedDecoration: Ornament? {
         model.settings.ornaments.first { $0.id == model.selectedOrnament } ?? model.settings.ornaments.first
+    }
+
+    @ViewBuilder private var collectedSnowmen: some View {
+        if !model.collectedSnowmen.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                sectionTitle("我的雪人", icon: .snowman)
+                ForEach($model.collectedSnowmen) { $snowman in
+                    HStack(spacing: 10) {
+                        Canvas { context, size in
+                            let balls = snowman.pose.balls(at: .zero)
+                            let bounds = balls.reduce(CGRect.null) { $0.union(RolledSnowArt.bounds(of: $1)) }
+                            guard !bounds.isEmpty else { return }
+                            let scale = min(size.width / bounds.width, size.height / bounds.height)
+                            context.withCGContext { ctx in
+                                ctx.translateBy(x: size.width / 2, y: size.height / 2)
+                                ctx.scaleBy(x: scale, y: scale)
+                                ctx.translateBy(x: -bounds.midX, y: -bounds.midY)
+                                for ball in balls { RolledSnowArt.draw(ball, reduced: true, ink: Ink(ctx: ctx)) }
+                            }
+                        }
+                        .frame(width: 62, height: 62)
+                        .accessibilityHidden(true)
+                        TextField("雪人名称", text: $snowman.name)
+                            .textFieldStyle(.roundedBorder)
+                        Button("摆到桌面") { model.placeCollectedSnowman?(snowman) }
+                            .buttonStyle(StudioButton())
+                            .accessibilityLabel("摆放\(snowman.name)")
+                        Button(role: .destructive) {
+                            let id = snowman.id
+                            model.collectedSnowmen.removeAll { $0.id == id }
+                        } label: { StudioIconView(icon: .trash, size: 18) }
+                            .buttonStyle(StudioButton())
+                            .accessibilityLabel("移除收藏\(snowman.name)")
+                    }
+                }
+            }
+            .surface()
+        }
     }
 
     private func decorationSettings(_ ornament: Ornament) -> some View {

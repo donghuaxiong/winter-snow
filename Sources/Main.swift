@@ -153,6 +153,7 @@ final class SnowAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         model.sendSleigh = { [weak engine] in engine?.sendSleigh() }
         model.cancelSnowman = { [weak engine] in engine?.cancelSnowman(reopen: true) }
         model.assembleSnowman = { [weak engine] in engine?.assembleSnowman() }
+        model.placeCollectedSnowman = { [weak engine] in engine?.placeCollectedSnowman($0) }
         model.showWardrobe = { [weak self] id, frame in self?.showWardrobe(id: id, beside: frame) }
         installMenu()
         NotificationCenter.default.addObserver(self, selector: #selector(displaysChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -472,8 +473,12 @@ private enum SelfTest {
         let screens = NSScreen.screens
         let visible = DesktopWindow.onscreen(primaryTop: screens.first?.frame.maxY ?? 0,
                                            ignoring: ProcessInfo.processInfo.processIdentifier)
-        print("Passed: window snow, natural overflow, pause and resume, Dock and Stage Manager geometry, plow cycle, preset and free-form snowmen, snowball growth, throws, window-to-window falls and floor impacts, free-hanging lights, fullscreen and power policy, gusts, sleigh gifts, tree branch snow, partial repaint, calendar, scene persistence, and \(Wallpaper.all.count) wallpapers.")
-        print("Live WindowServer: \(screens.count) display(s), \(visible.count) eligible window(s).")
+        print("Passed: window snow, natural overflow, pause and resume, Dock and Stage Manager geometry, plow cycle, preset and free-form snowmen, snowman collections, snowball growth, throws, window-to-window falls and floor impacts, free-hanging and attached lights, fullscreen and power policy, gusts, sleigh gifts, tree branch snow, partial repaint, calendar, scene persistence, and \(Wallpaper.all.count) wallpapers.")
+        if let visible {
+            print("Live WindowServer: \(screens.count) display(s), \(visible.count) eligible window(s).")
+        } else {
+            print("Live WindowServer: \(screens.count) display(s), window list unavailable.")
+        }
     }
 
     private static func checkWindowSnow(in region: CGRect, settings: SnowSettings) {
@@ -850,6 +855,37 @@ private enum SelfTest {
         rolled.removeProp(eye.id, from: ids[2])
         precondition(rolled.ball(ids[2])!.props.contains { $0.kind == .eye })
 
+        let pose = rolled.snowmanPose(containing: ids[2])!
+        let suite = "local.snowglow.self-test.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let library = SnowModel(defaults: defaults)
+        library.collectSnowman(pose)
+        let stored = SnowModel(defaults: defaults).collectedSnowmen.first!
+        precondition(stored.pose == pose && pose.parts.count == 5)
+        let restoredBase = p(region.midX, 0)
+        let rebuilt = stored.pose.balls(at: restoredBase)
+        let originalBase = rolled.ball(ids[0])!.center
+        for (part, ball) in zip([0, 1, 4, 2, 3], rebuilt) {
+            let original = rolled.ball(ids[part])!
+            precondition(abs((original.center.x - originalBase.x) - (ball.center.x - restoredBase.x)) < 0.001)
+            precondition(abs((original.center.y - originalBase.y) - (ball.center.y - restoredBase.y)) < 0.001)
+            precondition(original.id != ball.id && original.rotation == ball.rotation
+                         && original.mass == ball.mass && original.textureSeed == ball.textureSeed)
+            precondition(original.props.map(\.kind) == ball.props.map(\.kind))
+            for (old, new) in zip(original.props, ball.props) {
+                let oldPosition = old.worldAnchor(on: original)
+                let newPosition = new.worldAnchor(on: ball)
+                let dx = (oldPosition.x - original.center.x) - (newPosition.x - ball.center.x)
+                let dy = (oldPosition.y - original.center.y) - (newPosition.y - ball.center.y)
+                precondition(old.id != new.id && hypot(dx, dy) < 0.001)
+            }
+        }
+        var rePlaced = RolledSnow()
+        precondition(rePlaced.place(stored.pose, near: p(region.midX, region.maxY - 2), size: region.size, snow: scene))
+        precondition(!rePlaced.place(stored.pose, near: p(region.midX, region.maxY - 2), size: region.size, snow: scene))
+        precondition(rePlaced.balls.count == pose.parts.count && rePlaced.canToggleFree(for: rePlaced.balls[0].id) == false)
+
         let foot = rolled.ball(ids[0])!
         let originalTwigs = rolled.ball(ids[1])!.props
         rolled.take(at: foot.center, time: 42, snow: &scene, preferred: foot.id)
@@ -885,6 +921,7 @@ private enum SelfTest {
             rolled.advancePlowed(1.0 / 60, contact: contact, floor: floor.rect, reduced: false)
         }
         precondition(pushedProps && rolled.isEmpty)
+        precondition(SnowModel(defaults: defaults).collectedSnowmen.first?.pose == pose)
     }
 
     private static func checkSnowballThrows(in region: CGRect) {
@@ -1097,6 +1134,28 @@ private enum SelfTest {
         var decoration = Ornament(kind: .lights, display: 1, x: 0.5, y: 0.5)
         decoration.lightStrand = strand
         precondition((try! JSONDecoder().decode(Ornament.self, from: JSONEncoder().encode(decoration))).lightStrand == strand)
+
+        var tree = Ornament(kind: .tree, display: 1, x: 0.5, y: 0.5)
+        let treeFrame = CGRect(x: 120, y: 115, width: 160, height: 190)
+        let treeHost = LightStrand.Host(ornament: tree, frame: treeFrame)
+        let customPoints = [p(180, 185), p(242, 228), p(400, 297)]
+        let attachments = LightStrand.attachments(for: customPoints, on: [treeHost])
+        precondition(attachments.keys.sorted() == [0, 1])
+        var mounted = strand
+        mounted.attachments = attachments
+        let decoded = try! JSONDecoder().decode(LightStrand.self, from: JSONEncoder().encode(mounted))
+        precondition(decoded == mounted)
+        let movedFrame = treeFrame.offsetBy(dx: 786, dy: -42)
+        let moved = LightStrand.Host(ornament: tree, frame: movedFrame)
+        let resolved = decoded.resolvedAnchors(free: customPoints, hosts: [tree.id: moved])!
+        precondition(resolved[0] == p(966, 143) && resolved[1] == p(1028, 186) && resolved[2] == customPoints[2])
+        tree.rotation = 32
+        let rotated = LightStrand.Host(ornament: tree, frame: movedFrame.insetBy(dx: -25, dy: -29))
+        let rotatedPoint = rotated.point(for: attachments[0]!)
+        let restoredAttachment = rotated.attachment(at: rotatedPoint)!
+        precondition(hypot(restoredAttachment.position.x - attachments[0]!.position.x,
+                           restoredAttachment.position.y - attachments[0]!.position.y) < 0.0001)
+        precondition(decoded.resolvedAnchors(free: customPoints, hosts: [:]) == nil)
 
         let sill = SnowSurface(id: .window(41), rect: CGRect(x: 100, y: 180, width: 440, height: 210),
                                visible: [100...540], floor: false, cornerRadius: 18)

@@ -301,6 +301,12 @@ struct SavedScene: Codable, Identifiable {
     var settings: SnowSettings
 }
 
+struct CollectedSnowman: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var name: String
+    let pose: SnowmanPose
+}
+
 struct OriginalWallpaper: Codable {
     var url: URL
     var scaling: Int?
@@ -312,6 +318,7 @@ struct SnowStorage: Codable {
     var scenes: [SavedScene] = []
     var originals: [UInt32: OriginalWallpaper] = [:]
     var welcomeSeen = false
+    var collectedSnowmen: [CollectedSnowman]?
 
     mutating func removeWreaths() {
         settings.removeWreaths()
@@ -332,6 +339,7 @@ struct SnowStorage: Codable {
 final class SnowModel: ObservableObject {
     @Published var settings: SnowSettings { didSet { scheduleSave() } }
     @Published var scenes: [SavedScene] { didSet { scheduleSave() } }
+    @Published var collectedSnowmen: [CollectedSnowman] { didSet { scheduleSave() } }
     @Published var editMode = false
     @Published var preview = false
     @Published var idleActive = false
@@ -352,6 +360,7 @@ final class SnowModel: ObservableObject {
     var toggleLockSnow: (() -> Void)?
     var startPicking: (() -> Void)?
     var startSnowman: (() -> Void)?
+    var placeCollectedSnowman: ((CollectedSnowman) -> Void)?
     var hangLights: ((UUID?) -> Void)?
     var sendSleigh: (() -> Void)?
     var cancelSnowman: (() -> Void)?
@@ -371,15 +380,26 @@ final class SnowModel: ObservableObject {
         storage.migrateRetiredWallpapers()
         settings = storage.settings
         scenes = storage.scenes
+        collectedSnowmen = storage.collectedSnowmen ?? []
         originals = storage.originals
         welcomeSeen = storage.welcomeSeen
     }
 
     func persist() {
-        let storage = SnowStorage(settings: settings, scenes: scenes, originals: originals, welcomeSeen: welcomeSeen)
+        let storage = SnowStorage(settings: settings, scenes: scenes, originals: originals, welcomeSeen: welcomeSeen,
+                                  collectedSnowmen: collectedSnowmen.isEmpty ? nil : collectedSnowmen)
         if let data = try? JSONEncoder().encode(storage) {
             defaults?.set(data, forKey: "snowglow-state-v1")
         }
+    }
+
+    func collectSnowman(_ pose: SnowmanPose) {
+        let names = Set(collectedSnowmen.map(\.name))
+        let number = (1...(names.count + 1)).first { !names.contains("雪人 \($0)") } ?? names.count + 1
+        let name = "雪人 \(number)"
+        collectedSnowmen.append(CollectedSnowman(name: name, pose: pose))
+        persist()
+        feedback = "已收藏「\(name)」"
     }
 
     private func scheduleSave() {

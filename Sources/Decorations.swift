@@ -90,9 +90,9 @@ enum DecorationArt {
         lights(ink, points: points, ornament: ornament, time: time, scale: ornament.scale)
     }
 
-    static func freeLights(_ ornament: Ornament, screen: CGSize, brush: CGPoint?, wind: CGFloat, ink: Ink, time: Double) {
+    static func freeLights(_ ornament: Ornament, anchors: [CGPoint], brush: CGPoint?, wind: CGFloat, ink: Ink, time: Double) {
         guard let strand = ornament.lightStrand else { return }
-        let points = LightStrand.points(strand.anchors(in: screen), slack: strand.slack, at: time,
+        let points = LightStrand.points(anchors, slack: strand.slack, at: time,
                                        wind: wind, spacing: max(9, 19 * ornament.scale), brush: brush)
         if points.count > 1 { lights(ink, points: points, ornament: ornament, time: time, scale: ornament.scale) }
     }

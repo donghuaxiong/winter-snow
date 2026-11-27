@@ -133,6 +133,8 @@ private final class SnowRollView: NSView {
     var drag: ((CGPoint, Double) -> Void)?
     var release: ((CGPoint, Double) -> Void)?
     var menuAt: ((CGPoint, SnowRollView) -> NSMenu?)?
+    var menuClosed: (() -> Void)?
+    private(set) var trackingMenu: NSMenu?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func draw(_ dirtyRect: NSRect) {
@@ -157,9 +159,13 @@ private final class SnowRollView: NSView {
     override func mouseUp(with event: NSEvent) { release?(location(of: event), event.timestamp) }
 
     override func rightMouseDown(with event: NSEvent) {
-        if let menu = menuAt?(location(of: event), self) {
-            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        guard trackingMenu == nil, let menu = menuAt?(location(of: event), self) else { return }
+        trackingMenu = menu
+        defer {
+            trackingMenu = nil
+            menuClosed?()
         }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
     func item(_ title: String, image: NSImage? = nil, run: @escaping () -> Void) -> NSMenuItem {
@@ -197,6 +203,7 @@ private final class ScreenOverlay {
     var usable: CGRect
     var sim: DisplayScene
     var placements: [(Ornament, CGRect, DesktopWindow?)] = []
+    var lightAnchors: [UUID: [CGPoint]] = [:]
     var fallingSnowmen: [FallingSnowman] = []
     var plowedSnowmen: [PlowedSnowman] = []
     var rolledSnow = RolledSnow()
@@ -204,6 +211,7 @@ private final class ScreenOverlay {
     var treeSnow: [UUID: TreeBranchSnow] = [:]
     var plowedDecorations: [PlowedDecoration] = []
     private var drawnSnow: [SurfaceID: (seed: UInt64, revision: UInt64)] = [:]
+    private var drawnFrontFlakes: [CGRect] = []
     var visibleBack = false
     var visibleFront = false
 
@@ -249,6 +257,15 @@ private final class ScreenOverlay {
         }
         drawnSnow = next
         return changed
+    }
+
+    func changedFrontFlakes(showing: Bool, covered: CGRect?) -> [CGRect] {
+        let before = drawnFrontFlakes
+        drawnFrontFlakes = showing ? sim.flakes.compactMap { flake in
+            let bounds = flake.paintBounds
+            return covered?.contains(bounds) == true ? nil : bounds
+        } : []
+        return before + drawnFrontFlakes
     }
 
     func setVisibility(back shouldShowBack: Bool, front shouldShowFront: Bool) {
@@ -349,6 +366,11 @@ final class DesktopEngine {
     private var timer: Timer?
     private var lastTick = CACurrentMediaTime()
     private var lastScan: Double = 0
+    private let windowScanQueue = DispatchQueue(label: "snowglow.windows", qos: .userInitiated)
+    private var windowScanInFlight = false
+    private var pendingWindows: (windows: [DesktopWindow], studio: UInt32?)?
+    private var windowScanGeneration = 0
+    private var scannedStudio: UInt32?
     private var lastWeatherTick: Double = 0
     private var fastTrackingUntil: Double = 0
     private var lastPointer = CGPoint.zero
@@ -358,6 +380,8 @@ final class DesktopEngine {
     private var stageEnabled = false
     private var lastIdleCheck: Double = 0
     private var lastDockScan: Double = 0
+    private let dockScanQueue = DispatchQueue(label: "snowglow.dock", qos: .utility)
+    private var dockScanInFlight = false
     private var desktopDock: DesktopDock?
     private var dockHitBounds = DockHitBounds()
     private var dockDisplays: [NSScreen] = []
@@ -376,6 +400,7 @@ final class DesktopEngine {
     private var ballDragStart: (id: Int, point: CGPoint)?
     private var picking: [OverlayPanel] = []
     private var lightDraft: LightDraft?
+    private var snowmanPlacement: CollectedSnowman?
     private var snowRollGesture: SnowRollGesture?
     private var snowRollHandle: OverlayPanel?
     private var snowPointerMonitor: Any?
@@ -397,7 +422,6 @@ final class DesktopEngine {
     private var lastCanvasReducedMotion = false
     private var calendarDay: Date?
     private var lastStudioFrame: CGRect?
-    private var studioPresentation: (number: Int, logicalFrame: CGRect, visibleFrame: CGRect?, checked: Double)?
     private let pid = ProcessInfo.processInfo.processIdentifier
 
     init(model: SnowModel) {
@@ -427,6 +451,7 @@ final class DesktopEngine {
 
     @objc private func sleepDisplays() {
         screensAsleep = true
+        invalidateWindowScan()
         timer?.invalidate()
         timer = nil
         monitorSnowPointer(false)
@@ -442,7 +467,7 @@ final class DesktopEngine {
         screensAsleep = false
         lastTick = CACurrentMediaTime()
         lastWeatherTick = 0
-        lastScan = 0
+        lastDockScan = 0
         layoutDirty = true
         scheduleTimer(fps: !screens.isEmpty && fullscreenDisplays.count == screens.count ? 12 : powerLimited ? 40 : 60)
     }
@@ -464,7 +489,6 @@ final class DesktopEngine {
         let external = NSScreen.screens
         dockDisplays = external
         primaryTop = external.first?.frame.maxY ?? 0
-        studioPresentation = nil
         let ids = Set(external.map(\.snowScreenID))
         let displaysChanged = ids != Set(screens.keys) || external.contains { screens[$0.snowScreenID]?.frame != $0.frame }
         for key in Array(screens.keys) where !ids.contains(key) {
@@ -489,7 +513,7 @@ final class DesktopEngine {
             }
             screens[id] = overlay
         }
-        lastScan = 0
+        invalidateWindowScan()
         lastDockScan = 0
         layoutDirty = true
         if model.pickingWindow { finishPicking(nil) }
@@ -543,7 +567,7 @@ final class DesktopEngine {
         model.hideStudio?()
         showPicker(hint: "点击目标窗口 · 右键取消", onClick: { [weak self] point in
             guard let self else { return }
-            let found = self.getWindows().first { !$0.widget && $0.rect.contains(point) }
+            let found = self.readWindows(studio: self.studioWindowID)?.first { !$0.widget && $0.rect.contains(point) }
             if let found {
                 self.finishPicking(found.anchor)
             } else {
@@ -591,8 +615,9 @@ final class DesktopEngine {
 
     private func cancelActivity(reopen: Bool = false) {
         cancelSnowRoll()
-        guard lightDraft != nil else { return }
+        guard lightDraft != nil || snowmanPlacement != nil else { return }
         lightDraft = nil
+        snowmanPlacement = nil
         dismissPicker()
         layoutDirty = true
         if reopen { model.showStudio?() }
@@ -606,6 +631,7 @@ final class DesktopEngine {
         if model.pickingWindow { finishPicking(nil, reopen: false) }
         cancelSnowman()
         cancelActivity()
+        cancelOrnamentDrag()
         model.editMode = false
         model.hideStudio?()
         return true
@@ -613,7 +639,7 @@ final class DesktopEngine {
 
     private var canRollSnow: Bool {
         model.settings.rollSnowballs && model.settings.accumulate && !screensAsleep && !model.preview
-            && !model.pickingWindow && !model.editMode && !model.buildingSnowman && lightDraft == nil
+            && !model.pickingWindow && !model.editMode && !model.buildingSnowman && lightDraft == nil && snowmanPlacement == nil
     }
 
     private func monitorSnowPointer(_ enabled: Bool) {
@@ -643,11 +669,13 @@ final class DesktopEngine {
     }
 
     private func refreshSnowRollHandle(at point: CGPoint) {
+        // AppKit runs the animation timer during menu tracking.
+        if let view = snowRollHandle?.contentView as? SnowRollView, view.trackingMenu != nil { return }
         if !canRollSnow { cancelSnowRoll(); return }
         guard snowRollGesture == nil, NSEvent.pressedMouseButtons == 0 else { return }
-        guard let hit = snowRollHit(at: point) else { snowRollHandle?.orderOut(nil); return }
+        guard let hit = snowRollHit(at: point) else { hideSnowRollHandle(); return }
         let frame = hit.screen.global(hit.rect).intersection(hit.screen.frame)
-        guard frame.width >= 1, frame.height > 0.45 else { snowRollHandle?.orderOut(nil); return }
+        guard frame.width >= 1, frame.height > 0.45 else { hideSnowRollHandle(); return }
         let panel: OverlayPanel
         if let existing = snowRollHandle { panel = existing }
         else {
@@ -657,10 +685,12 @@ final class DesktopEngine {
             view.drag = { [weak self] point, time in self?.rollSnow(to: point, time: time) }
             view.release = { [weak self] point, time in self?.releaseSnow(at: point, time: time) }
             view.menuAt = { [weak self] point, view in self?.snowRollMenu(at: point, view: view) }
+            view.menuClosed = { [weak self] in self?.refreshSnowRollHandle(at: NSEvent.mouseLocation) }
             panel.contentView = view
             snowRollHandle = panel
         }
-        panel.contentView?.setAccessibilityLabel(hit.prop?.kind.title ?? (hit.ball == nil ? "搓雪球" : "雪球"))
+        let label = hit.prop?.kind.title ?? (hit.ball == nil ? "搓雪球" : "雪球")
+        if panel.contentView?.accessibilityLabel() != label { panel.contentView?.setAccessibilityLabel(label) }
         if panel.frame != frame { panel.setFrame(frame, display: true) }
         if !panel.isVisible { panel.orderFrontRegardless() }
     }
@@ -685,6 +715,12 @@ final class DesktopEngine {
         menu.addItem(free)
         if screen.rolledSnow.canFinishStack(containing: id) {
             menu.addItem(view.item("堆成雪人") { [weak self] in self?.finishRolledSnowman(containing: id) })
+        }
+        if screen.rolledSnow.snowmanPose(containing: id) != nil {
+            menu.addItem(view.item("收藏这个雪人") { [weak self, weak screen] in
+                guard let pose = screen?.rolledSnow.snowmanPose(containing: id) else { return }
+                self?.model.collectSnowman(pose)
+            })
         }
         for choices: [SnowballPropChoice] in [[.eyes, .carrot, .coal], [.leftTwig, .rightTwig], [.feltHat, .woolHat, .scarf]] {
             menu.addItem(.separator())
@@ -760,11 +796,38 @@ final class DesktopEngine {
     }
 
     private func cancelSnowRoll() {
+        if let view = snowRollHandle?.contentView as? SnowRollView { view.trackingMenu?.cancelTracking() }
         if let gesture = snowRollGesture, gesture.started, gesture.prop == nil {
             screens[gesture.display]?.rolledSnow.release(at: .infinity, stacking: false)
         }
         snowRollGesture = nil
-        snowRollHandle?.orderOut(nil)
+        hideSnowRollHandle()
+    }
+
+    func placeCollectedSnowman(_ snowman: CollectedSnowman) {
+        guard prepareActivity() else { return }
+        snowmanPlacement = snowman
+        showPicker(hint: "点击窗沿或屏幕底部摆放雪人 · Esc 取消", onClick: { [weak self] point in
+            self?.dropCollectedSnowman(at: point)
+        }, onCancel: { [weak self] in self?.cancelActivity(reopen: true) },
+                   key: { [weak self] key in
+                       if key == 53 { self?.cancelActivity(reopen: true) }
+                   })
+    }
+
+    private func dropCollectedSnowman(at point: CGPoint) {
+        guard let snowman = snowmanPlacement,
+              let screen = screens.values.first(where: { $0.frame.contains(point) }) else { return }
+        let studio = presentedStudio()?.frame
+        updateLayout(on: screen, studio: studio, hasOrnaments: model.settings.ornamentsVisible)
+        let local = screen.local(CGRect(origin: point, size: .zero)).origin
+        let placed = screen.rolledSnow.place(snowman.pose, near: local, size: screen.frame.size, snow: screen.sim)
+        cancelActivity(reopen: !placed)
+        model.feedback = placed ? "已摆放「\(snowman.name)」" : "这里放不下雪人，请选择另一处。"
+    }
+
+    private func hideSnowRollHandle() {
+        if let handle = snowRollHandle, handle.isVisible { handle.orderOut(nil) }
     }
 
     var hasRolledSnowman: Bool { screens.values.contains { $0.rolledSnow.hasStack } }
@@ -794,8 +857,21 @@ final class DesktopEngine {
         guard prepareActivity() else { return }
         let item = model.settings.ornaments.first { $0.id == id && $0.lightStrand != nil }
         lightDraft = LightDraft(ornament: item)
-        if let item, let strand = item.lightStrand, let screen = screens[item.display], !fullscreenDisplays.contains(screen.id) {
-            lightDraft = LightDraft(display: screen.id, ornament: item, hooks: strand.anchors(in: screen.frame.size), slack: strand.slack)
+        if let item, let strand = item.lightStrand {
+            let available = screens.values.filter { !fullscreenDisplays.contains($0.id) }
+            let resolved = available.compactMap { screen in
+                lightGeometry(for: item, on: screen).map { (screen, $0.anchors) }
+            }.max { a, b in
+                let aBounds = CGRect(origin: .zero, size: a.0.frame.size)
+                let bBounds = CGRect(origin: .zero, size: b.0.frame.size)
+                return a.1.filter(aBounds.contains).count < b.1.filter(bBounds.contains).count
+            }
+            if let (screen, hooks) = resolved {
+                lightDraft = LightDraft(display: screen.id, ornament: item, hooks: hooks, slack: strand.slack)
+            } else if let screen = available.first(where: { $0.id == item.display }) ?? available.first {
+                lightDraft = LightDraft(display: screen.id, ornament: item,
+                                        hooks: strand.anchors(in: screen.frame.size), slack: strand.slack)
+            }
         }
         showPicker(hint: "点一下挂钩 · 拖动可调整 · 滚轮调松紧 · 回车或右键保存 · Esc 取消",
                    onClick: { [weak self] point in self?.placeHook(at: point) },
@@ -863,7 +939,7 @@ final class DesktopEngine {
             return
         }
         let hooks = draft.hooks.map { p($0.x / screen.frame.width, $0.y / screen.frame.height) }
-        let strand = LightStrand(hooks: hooks, slack: draft.slack)
+        let strand = LightStrand(hooks: hooks, slack: draft.slack, attachments: attachedHooks(draft.hooks, on: screen))
         var item = draft.ornament ?? Ornament(kind: .lights, display: id, x: 0.5, y: 0.5)
         if draft.ornament == nil { item.lightMotion = .twinkle }
         item.display = id
@@ -884,7 +960,7 @@ final class DesktopEngine {
         if anchors.count > 1 {
             var item = draft.ornament ?? Ornament(kind: .lights, display: id, x: 0.5, y: 0.5)
             item.lightStrand = LightStrand(hooks: anchors.map { p($0.x / screen.frame.width, $0.y / screen.frame.height) }, slack: draft.slack)
-            DecorationArt.freeLights(item, screen: screen.frame.size, brush: nil, wind: 0, ink: ink, time: 0)
+            DecorationArt.freeLights(item, anchors: anchors, brush: nil, wind: 0, ink: ink, time: 0)
         }
         for hook in draft.hooks {
             ink.circle(hook.x, hook.y, 7, 0x12304c)
@@ -896,13 +972,18 @@ final class DesktopEngine {
         let pointer = NSEvent.mouseLocation
         let available = screens.values.filter { !fullscreenDisplays.contains($0.id) }
         guard let screen = available.first(where: { $0.frame.contains(pointer) }) ?? available.first else { return }
-        screen.festivities.launch()
-        model.feedback = "雪橇已经出发。"
+        let display = screen.id
+        SleighFlightArt.preload { [weak self] in
+            guard let self, !self.screensAsleep, !self.fullscreenDisplays.contains(display),
+                  let screen = self.screens[display] else { return }
+            screen.festivities.launch()
+            self.model.feedback = "雪橇已经出发。"
+        }
     }
 
     @objc private func spaceChanged() {
         spaceChangedAt = CACurrentMediaTime()
-        studioPresentation = nil
+        invalidateWindowScan()
         snowmanPerches.removeAll()
         windows.removeAll()
         shakes.removeAll()
@@ -910,16 +991,41 @@ final class DesktopEngine {
         windowExits.removeAll(keepingCapacity: true)
         windowSnow.clear()
         layoutDirty = true
-        lastScan = 0
         cancelActivity()
         cancelOrnamentDrag()
         cancelSnowman()
     }
 
-    private func getWindows() -> [DesktopWindow] {
-        let settingsWindow = studioInSpace.flatMap { UInt32(exactly: $0.windowNumber) }
-        return DesktopWindow.onscreen(primaryTop: primaryTop, ignoring: pid, includingOwnWindow: settingsWindow,
-                                      stageDisplays: stageDisplays)
+    private func invalidateWindowScan() {
+        windowScanGeneration &+= 1
+        lastScan = 0
+        pendingWindows = nil
+        scannedStudio = nil
+    }
+
+    private func readWindows(studio: UInt32?) -> [DesktopWindow]? {
+        DesktopWindow.onscreen(primaryTop: primaryTop, ignoring: pid, includingOwnWindow: studio,
+                               stageDisplays: stageDisplays)
+    }
+
+    private func requestWindows(at now: Double, studio: UInt32?) {
+        // Keep rendering from the last complete snapshot while WindowServer replies.
+        guard !windowScanInFlight else { return }
+        windowScanInFlight = true
+        lastScan = now
+        let generation = windowScanGeneration
+        let (top, owner, stage) = (primaryTop, pid, stageDisplays)
+        windowScanQueue.async { [weak self] in
+            let windows = DesktopWindow.onscreen(primaryTop: top, ignoring: owner, includingOwnWindow: studio,
+                                                 stageDisplays: stage)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.windowScanInFlight = false
+                if self.windowScanGeneration == generation, let windows {
+                    self.pendingWindows = (windows, studio)
+                }
+            }
+        }
     }
 
     private var studioInSpace: NSWindow? {
@@ -928,28 +1034,22 @@ final class DesktopEngine {
         return studio
     }
 
-    private func presentedStudio(at now: Double = CACurrentMediaTime()) -> (id: UInt32, frame: CGRect)? {
+    private var studioWindowID: UInt32? {
+        studioInSpace.flatMap { UInt32(exactly: $0.windowNumber) }
+    }
+
+    private func presentedStudio() -> (id: UInt32, frame: CGRect)? {
         guard let studio = studioInSpace, studio.occlusionState.contains(.visible),
-              let id = UInt32(exactly: studio.windowNumber) else {
-            studioPresentation = nil
-            return nil
-        }
-        let number = studio.windowNumber
-        let logicalFrame = studio.frame
-        if let cached = studioPresentation, cached.number == number, cached.logicalFrame == logicalFrame,
-           now - cached.checked < 1.0 / 30 {
-            return cached.visibleFrame.map { (id, $0) }
-        }
-        let frame = DesktopWindow.presentedFrame(of: number, primaryTop: primaryTop)
-        studioPresentation = (number, logicalFrame, frame, now)
-        return frame.map { (id, $0) }
+              let id = UInt32(exactly: studio.windowNumber) else { return nil }
+        if scannedStudio != id { return (id, studio.frame) }
+        return windows.first(where: { $0.id == id }).map { (id, $0.rect) }
     }
 
     private var stageDisplays: [CGRect] { stageEnabled ? screens.values.map(\.frame) : [] }
 
     @objc private func applicationActivated() {
         guard stageEnabled else { return }
-        lastScan = 0
+        invalidateWindowScan()
         fastTrackingUntil = CACurrentMediaTime() + 0.34
     }
 
@@ -1006,7 +1106,12 @@ final class DesktopEngine {
             cancelSnowman(reopen: true)
             return
         }
-        windows = getWindows()
+        invalidateWindowScan()
+        let studioID = studioWindowID
+        if let current = readWindows(studio: studioID) {
+            windows = current
+            scannedStudio = studioID
+        }
         let hasOrnaments = model.settings.ornamentsVisible && !model.settings.ornaments.isEmpty
         let studio = presentedStudio()?.frame
         for display in screens.values { updateLayout(on: display, studio: studio, hasOrnaments: hasOrnaments) }
@@ -1200,13 +1305,21 @@ final class DesktopEngine {
             lastIdleCheck = now
             readIdle(now)
             reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            stageEnabled = CFPreferencesCopyAppValue("GloballyEnabled" as CFString,
-                                                     "com.apple.WindowManager" as CFString) as? Bool ?? false
+            let stage = CFPreferencesCopyAppValue("GloballyEnabled" as CFString,
+                                                  "com.apple.WindowManager" as CFString) as? Bool ?? false
+            if stage != stageEnabled {
+                stageEnabled = stage
+                invalidateWindowScan()
+            }
             let day = Calendar.current.startOfDay(for: Date())
             dayChanged = day != calendarDay
             calendarDay = day
         }
         let settings = model.settings
+        if settings.rollSnowballs && lastSettings?.rollSnowballs != true { RolledSnowArt.preload() }
+        if settings.enabled && settings.festiveVisits && (lastSettings?.enabled != true || lastSettings?.festiveVisits != true) {
+            SleighFlightArt.preload()
+        }
         if now - lastPowerCheck >= 1.2 {
             lastPowerCheck = now
             powerLimited = settings.adaptivePower && DesktopWeatherPower.limited
@@ -1230,27 +1343,20 @@ final class DesktopEngine {
             $0.sim.hasAccumulation || $0.sim.weatherAnimating || $0.sim.fallingSnowAnimating
                 || !$0.fallingSnowmen.isEmpty || !$0.rolledSnow.isEmpty
         })
-        let active = running || tracksSnow || hasOrnaments || model.buildingSnowman || lightDraft != nil
+        let active = running || tracksSnow || hasOrnaments || model.buildingSnowman || lightDraft != nil || snowmanPlacement != nil
             || screens.values.contains {
                 !$0.fallingSnowmen.isEmpty || !$0.plowedSnowmen.isEmpty || !$0.plowedDecorations.isEmpty
                     || $0.sim.weatherAnimating || $0.sim.fallingSnowAnimating || $0.festivities.active || !$0.rolledSnow.isEmpty
             }
-        let studio = presentedStudio(at: now)?.frame
-        let studioChanged = studio != lastStudioFrame
-        let changed = settings != lastSettings || model.editMode != lastEditing || studioChanged || wasRunning != running
         if lastSettings?.accumulate == true && !settings.accumulate {
             for screen in screens.values { screen.sim.clearAccumulation() }
         }
-        lastSettings = settings
-        lastEditing = model.editMode
-        lastStudioFrame = studio
-
-        wasRunning = running
         let tracksWindows = hasOrnaments && settings.ornaments.contains { $0.anchor != nil }
         let mouseDown = (NSEvent.pressedMouseButtons & 1) != 0
         let pointer = NSEvent.mouseLocation
         let previousPointer = lastPointer
-        if mouseDown != mouseWasDown || (mouseDown && pointer != lastPointer) {
+        // Our snowball handle already owns this drag, so it cannot move another window.
+        if snowRollGesture == nil && (mouseDown != mouseWasDown || (mouseDown && pointer != lastPointer)) {
             fastTrackingUntil = now + 0.18
         }
         lastPointer = pointer
@@ -1260,14 +1366,16 @@ final class DesktopEngine {
         let fastTracking = (tracksSnow || tracksWindows || model.buildingSnowman) && now < fastTrackingUntil
         let allCovered = !screens.isEmpty && fullscreenDisplays.count == screens.count
         let scanInterval = allCovered ? 0.30 : powerLimited ? 0.15 : (running || tracksWindows ? 0.082 : 0.21)
-        let needsScan = active && (studioChanged || fastTracking || now - lastScan >= scanInterval)
+        let studioID = studioWindowID
         let oldFrontWindow = windows.first(where: { !$0.widget })?.rect ?? .null
         var geometryChanged = false
+        var scanned = false
         var shaken: [(id: UInt32, speed: CGFloat)] = []
-        if needsScan {
-            lastScan = now
+        if let snapshot = pendingWindows, active, snapshot.studio == studioID {
+            scanned = true
             let previous = windows
-            windows = getWindows()
+            windows = snapshot.windows
+            scannedStudio = snapshot.studio
             geometryChanged = previous != windows
             if geometryChanged && tracksSnow { fastTrackingUntil = max(fastTrackingUntil, now + 0.10) }
             let ids = Set(windows.map(\.id))
@@ -1301,6 +1409,17 @@ final class DesktopEngine {
                 }
             }
         }
+        pendingWindows = nil
+        if active && (studioID != scannedStudio || fastTracking || now - lastScan >= scanInterval) {
+            requestWindows(at: now, studio: studioID)
+        }
+        let studio = presentedStudio()?.frame
+        let studioChanged = studio != lastStudioFrame
+        let changed = settings != lastSettings || model.editMode != lastEditing || studioChanged || wasRunning != running
+        lastSettings = settings
+        lastEditing = model.editMode
+        lastStudioFrame = studio
+        wasRunning = running
 
         let hidden = settings.avoidFullscreen ? Set(screens.values.filter { screen in
             windows.contains { !$0.widget && DesktopWeatherPower.fullscreen($0.rect, on: screen.frame) }
@@ -1323,6 +1442,7 @@ final class DesktopEngine {
             let movedDecoration: ((Ornament, CGRect, DesktopWindow?)) -> Bool = { placement in
                 let (ornament, _, target) = placement
                 return target != nil || ornament.id == draggedID || (dockChanged && ornament.kind == .snowman)
+                    || ornament.lightStrand?.attached == true
             }
             for screen in screens.values {
                 let oldSurfaces = fullLayout ? [] : screen.sim.surfaces
@@ -1337,7 +1457,7 @@ final class DesktopEngine {
                     if geometryChanged || draggedID != nil || dockChanged {
                         let moved = oldDecorations + screen.placements.filter(movedDecoration)
                         for (ornament, rect, _) in moved {
-                            regions.append(ornament.paintBounds(in: rect))
+                            regions.append(ornament.lightStrand == nil ? ornament.paintBounds(in: rect) : rect)
                         }
                     }
                     layoutRegions[screen.id] = regions
@@ -1348,7 +1468,10 @@ final class DesktopEngine {
         for shake in shaken {
             dropWindowSnow(shake.id, horizontalSpeed: shake.speed)
         }
-        if needsScan { updateSnowmanPerches(now: now) }
+        if scanned {
+            if hasOrnaments && dragSession == nil && lightDraft == nil { attachExistingLights() }
+            updateSnowmanPerches(now: now)
+        }
         if workshop != nil {
             let platforms = workshopPlatforms()
             workshop?.advance(delta, platforms: platforms)
@@ -1363,7 +1486,8 @@ final class DesktopEngine {
         lastCanvasReducedMotion = reducedMotion
         lastSelection = model.selectedOrnament
         let canSweep = tracksSnow && !idleScene && !mouseDown && !model.editMode && !model.pickingWindow
-            && !model.buildingSnowman && snowRollGesture == nil && lightDraft == nil && studio?.contains(pointer) != true
+            && !model.buildingSnowman && snowRollGesture == nil && lightDraft == nil && snowmanPlacement == nil
+            && studio?.contains(pointer) != true
         let behind = settings.layer == .behindWindows && !idleScene
         let animatedDecorations = hasOrnaments && !reducedMotion && settings.ornaments.contains {
             $0.kind == .tree || $0.kind == .lantern || $0.lightStrand != nil || ($0.kind == .lights && $0.lightMotion != .steady)
@@ -1446,11 +1570,17 @@ final class DesktopEngine {
             if active && (needsLayout || fullFront || stepWeather || (sceneTick && animatedDecorations) || hadFallingSnow || hasFallingSnowmen
                           || plowWasPushing || workshop != nil || swept || rollingWasActive || rolledChanged || arrangingProp
                           || holidayWasActive || screen.festivities.active) {
-                let moving = movingFront(on: screen, weatherInFront: !behind, idleScene: idleScene)
+                let moving = movingFront(on: screen)
                 var changedRegions = screen.changedSnow(showing: settings.accumulate)
                 changedRegions += layoutRegions[screen.id] ?? []
                 changedRegions += changedFlakeMask.map(screen.local)
                 changedRegions += plowedRegions
+                // Physics can step between weather frames without repainting the entire snowfall.
+                if stepWeather || fullFront {
+                    let covered = !idleScene && settings.layer == .behindFrontWindow && !newFrontWindow.isNull
+                        ? screen.local(newFrontWindow) : nil
+                    changedRegions += screen.changedFrontFlakes(showing: !behind, covered: covered)
+                }
                 screen.frontView.invalidate(moving: moving, changed: changedRegions, full: fullFront)
                 if dockChanged || (geometryChanged && (fastTracking || tracksSnow)) { screen.frontView.displayIfNeeded() }
             }
@@ -1519,7 +1649,8 @@ final class DesktopEngine {
     private func collideDecorations(_ contact: SnowplowContact, floor: CGRect, on screen: ScreenOverlay) -> [CGRect] {
         var destroyed = Set<UUID>()
         var regions: [CGRect] = []
-        for (ornament, rect, target) in screen.placements where dragSession?.handle.ornament != ornament.id {
+        for (ornament, rect, target) in screen.placements
+        where dragSession?.handle.ornament != ornament.id && ornament.lightStrand?.attached != true {
             if ornament.kind == .snowman {
                 let parts = SnowmanArt.parts(for: ornament, in: rect)
                 guard let base = parts.first, contact.hits(base) else { continue }
@@ -1556,15 +1687,8 @@ final class DesktopEngine {
         return regions
     }
 
-    private func movingFront(on screen: ScreenOverlay, weatherInFront: Bool, idleScene: Bool) -> [CGRect] {
+    private func movingFront(on screen: ScreenOverlay) -> [CGRect] {
         var rects = screen.sim.released.map(\.paintBounds)
-        if weatherInFront {
-            let covered = model.settings.layer == .behindFrontWindow && !idleScene
-                ? windows.first(where: { !$0.widget }).map { screen.local($0.rect) } : nil
-            for flake in screen.sim.flakes where covered?.contains(flake.paintBounds) != true {
-                rects.append(flake.paintBounds)
-            }
-        }
         if !reducedMotion {
             for (ornament, rect, _) in screen.placements
             where ornament.kind == .lantern || ornament.lightStrand != nil || (ornament.kind == .lights && ornament.lightMotion != .steady) {
@@ -1604,14 +1728,24 @@ final class DesktopEngine {
     }
 
     private func updateDock(at now: Double) -> Bool {
-        if now - lastDockScan >= 1.25 {
+        if !dockScanInFlight, now - lastDockScan >= 1.25 {
             lastDockScan = now
-            let dock = DesktopDock(primaryTop: primaryTop)
-            desktopDock = dock
-            dockEdge = dock.edge
-            fallbackDockFrames = Dictionary(uniqueKeysWithValues: dockDisplays.compactMap { display in
-                dock.frame(on: display).map { (display.snowScreenID, $0) }
-            })
+            dockScanInFlight = true
+            let top = primaryTop
+            let displayFrames = dockDisplays.map(\.frame)
+            dockScanQueue.async { [weak self] in
+                let dock = DesktopDock(primaryTop: top, displayFrames: displayFrames)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.dockScanInFlight = false
+                    guard self.lastDockScan == now, !self.screensAsleep else { return }
+                    self.desktopDock = dock
+                    self.dockEdge = dock.edge
+                    self.fallbackDockFrames = Dictionary(uniqueKeysWithValues: self.dockDisplays.compactMap { display in
+                        dock.frame(on: display).map { (display.snowScreenID, $0) }
+                    })
+                }
+            }
         }
         let frames: [UInt32: CGRect]
         if let (display, frame) = desktopDock?.liveFrame(primaryTop: primaryTop, displays: dockDisplays, hitBounds: &dockHitBounds) {
@@ -1711,46 +1845,104 @@ final class DesktopEngine {
         }
     }
 
+    private func placement(of ornament: Ornament, on screen: ScreenOverlay) -> (Ornament, CGRect, DesktopWindow?)? {
+        guard ornament.id != workshopSource else { return nil }
+        if let dragSession, let preview = dragSession.preview, dragSession.handle.ornament == ornament.id {
+            return preview.display == screen.id ? (ornament, screen.local(preview.frame), nil) : nil
+        }
+        if let anchor = ornament.anchor {
+            guard let target = layoutAnchor(anchor), target.rect.intersects(screen.frame) else { return nil }
+            let rect = screen.local(target.rect)
+            if ornament.kind == .lights { return (ornament, rect, target) }
+            let size = ornament.drawnSize
+            let centerX = rect.minX + rect.width * ornament.x
+            let foot = ornament.kind == .snowman ? SnowmanArt.baseline * ornament.scale : size.height * 0.82
+            let frame = CGRect(x: centerX - size.width / 2, y: rect.minY - foot, width: size.width, height: size.height)
+            return (ornament, frame, target)
+        }
+        let main = dockDisplays.first?.snowScreenID
+        guard ornament.display == screen.id || (screens[ornament.display] == nil && screen.id == main) else { return nil }
+        let dock = dockEdge == .bottom ? dockFrames[screen.id] : nil
+        return (ornament, screen.local(screen.place(ornament, dock: dock)), nil)
+    }
+
+    private func attachedHooks(_ points: [CGPoint], on screen: ScreenOverlay) -> [Int: LightStrand.Attachment] {
+        let hosts = screen.placements.compactMap { ornament, frame, _ -> LightStrand.Host? in
+            guard ornament.kind != .lights else { return nil }
+            return LightStrand.Host(ornament: ornament, frame: frame)
+        }
+        return LightStrand.attachments(for: points, on: hosts)
+    }
+
+    private func attachExistingLights() {
+        // Existing scenes stored only screen coordinates. Match their hooks once against the restored scene.
+        for ornament in model.settings.ornaments {
+            guard let strand = ornament.lightStrand, strand.attachments == nil,
+                  let screen = screens[ornament.display] ?? dockDisplays.first.flatMap({ screens[$0.snowScreenID] }) else { continue }
+            let matches = attachedHooks(strand.anchors(in: screen.frame.size), on: screen)
+            model.change(ornament.id) { $0.lightStrand?.attachments = matches }
+        }
+    }
+
+    private func lightGeometry(for ornament: Ornament, on screen: ScreenOverlay)
+        -> (anchors: [CGPoint], target: DesktopWindow?)? {
+        guard let strand = ornament.lightStrand, strand.hooks.count > 1,
+              let original = screens[ornament.display] ?? dockDisplays.first.flatMap({ screens[$0.snowScreenID] }) else { return nil }
+        let originalAnchors = strand.anchors(in: original.frame.size)
+        guard strand.attached, let attachments = strand.attachments else {
+            return original.id == screen.id ? (originalAnchors, nil) : nil
+        }
+
+        let ids = Set(attachments.values.map(\.ornament))
+        let singleHost = ids.count == 1 && attachments.count == originalAnchors.count
+        var target: DesktopWindow?
+        var hosts: [UUID: LightStrand.Host] = [:]
+        for id in ids {
+            guard let host = model.settings.ornaments.first(where: { $0.id == id && $0.kind != .lights }) else { continue }
+            if let placed = placement(of: host, on: screen) {
+                hosts[id] = LightStrand.Host(ornament: host, frame: placed.1)
+                if singleHost { target = placed.2 }
+            } else {
+                for other in screens.values where other.id != screen.id {
+                    guard let placed = placement(of: host, on: other) else { continue }
+                    hosts[id] = LightStrand.Host(ornament: host, frame: screen.local(other.global(placed.1)))
+                    if singleHost { target = placed.2 }
+                    break
+                }
+            }
+        }
+        let points = originalAnchors.map {
+            p($0.x + original.frame.minX - screen.frame.minX, $0.y + screen.frame.maxY - original.frame.maxY)
+        }
+        return strand.resolvedAnchors(free: points, hosts: hosts).map { ($0, target) }
+    }
+
     private func updateLayout(on screen: ScreenOverlay, studio: CGRect?, hasOrnaments: Bool) {
         let region = screen.local(screen.frame)
         var placements: [(Ornament, CGRect, DesktopWindow?)] = []
+        var mountedLights: [(Ornament, CGRect, DesktopWindow?)] = []
+        var lightAnchors: [UUID: [CGPoint]] = [:]
         var draggedPlacement: (Ornament, CGRect, DesktopWindow?)?
-        let mainScreen = NSScreen.screens.first?.snowScreenID
         if hasOrnaments {
             for ornament in model.settings.ornaments where ornament.id != workshopSource {
                 if let strand = ornament.lightStrand {
-                    let here = ornament.display == screen.id || (screens[ornament.display] == nil && screen.id == mainScreen)
-                    if here, ornament.id != lightDraft?.ornament?.id, strand.hooks.count > 1 {
-                        placements.append((ornament, strand.bounds(in: screen.frame.size, bulbScale: ornament.scale), nil))
-                    }
-                    continue
-                }
-                if let dragSession, let preview = dragSession.preview, dragSession.handle.ornament == ornament.id {
-                    if preview.display == screen.id { draggedPlacement = (ornament, screen.local(preview.frame), nil) }
-                    continue
-                }
-                if let anchor = ornament.anchor {
-                    guard let target = layoutAnchor(anchor), target.rect.intersects(screen.frame) else { continue }
-                    let rect = screen.local(target.rect)
-                    if ornament.kind == .lights {
-                        placements.append((ornament, rect, target))
-                    } else {
-                        let width = ornament.kind.size.width * ornament.scale
-                        let height = ornament.kind.size.height * ornament.scale
-                        let centerX = rect.minX + rect.width * ornament.x
-                        let foot = ornament.kind == .snowman ? SnowmanArt.baseline * ornament.scale : height * 0.82
-                        let frame = CGRect(x: centerX - width / 2, y: rect.minY - foot, width: width, height: height)
-                        placements.append((ornament, frame, target))
-                    }
-                } else if ornament.display == screen.id || (screens[ornament.display] == nil && screen.id == mainScreen) {
-                    let dock = dockEdge == .bottom ? dockFrames[screen.id] : nil
-                    let frame = screen.place(ornament, dock: dock)
-                    placements.append((ornament, screen.local(frame), nil))
+                    guard ornament.id != lightDraft?.ornament?.id, let geometry = lightGeometry(for: ornament, on: screen) else { continue }
+                    let bounds = LightStrand.bounds(of: geometry.anchors, bulbScale: ornament.scale)
+                    guard bounds.intersects(region) else { continue }
+                    lightAnchors[ornament.id] = geometry.anchors
+                    let item = (ornament, bounds, geometry.target)
+                    if strand.attached { mountedLights.append(item) }
+                    else { placements.append(item) }
+                } else if let placed = placement(of: ornament, on: screen) {
+                    if dragSession?.preview != nil && dragSession?.handle.ornament == ornament.id { draggedPlacement = placed }
+                    else { placements.append(placed) }
                 }
             }
         }
         if let draggedPlacement { placements.append(draggedPlacement) }
+        placements += mountedLights
         screen.placements = placements
+        screen.lightAnchors = lightAnchors
         var surfaces: [SnowSurface] = []
         var covers: [CGRect] = []
         if let dock = dockFrames[screen.id] {
@@ -1813,12 +2005,16 @@ final class DesktopEngine {
         let idleScene = model.preview || (model.running && model.idleActive && settings.idleSeconds > 0)
         let now = CACurrentMediaTime()
         let motionTime = reducedMotion ? 0 : now
-        let studio = isBack ? nil : presentedStudio(at: now)
+        let flakeTime = reducedMotion ? 0 : lastWeatherTick
+        let studio = isBack ? nil : presentedStudio()
         let studioSurface = studio.map { SurfaceID.window($0.id) }
         func paintDrift(_ surface: SnowSurface) {
-            guard dirty.intersects(surface.paintBounds), let drift = screen.sim.drift(on: surface.id) else { return }
+            let band = dirty.intersection(surface.paintBounds)
+            guard !band.isEmpty, let drift = screen.sim.drift(on: surface.id) else { return }
             ink.ctx.saveGState()
-            outside(surface.occluders, bounds: bounds, ink: ink)
+            // Window occlusion only matters inside this snow band.
+            ink.ctx.clip(to: band)
+            outside(surface.occluders, bounds: band, ink: ink)
             SnowArt.drift(drift, on: surface, icicles: settings.icicles, ink: ink)
             ink.ctx.restoreGState()
         }
@@ -1828,13 +2024,13 @@ final class DesktopEngine {
         if !screen.sim.flakes.isEmpty {
             ink.ctx.saveGState()
             if isBack {
-                paintFlakes(screen.sim.flakes, ink: ink, dirty: dirty, crystalMix: settings.crystalMix, time: motionTime)
+                paintFlakes(screen.sim.flakes, ink: ink, dirty: dirty, crystalMix: settings.crystalMix, time: flakeTime)
             } else if settings.layer != .behindWindows || idleScene {
                 if settings.layer == .behindFrontWindow && !idleScene,
                    let front = windows.first(where: { !$0.widget }) {
                     outside([screen.local(front.rect)], bounds: bounds, ink: ink)
                 }
-                paintFlakes(screen.sim.flakes, ink: ink, dirty: dirty, crystalMix: settings.crystalMix, time: motionTime)
+                paintFlakes(screen.sim.flakes, ink: ink, dirty: dirty, crystalMix: settings.crystalMix, time: flakeTime)
             }
             ink.ctx.restoreGState()
         }
@@ -1848,9 +2044,9 @@ final class DesktopEngine {
                     let nearer = windows.prefix { $0.id != target.id }
                     outside(nearer.map { screen.local($0.rect) }, bounds: bounds, ink: ink)
                 }
-                if ornament.lightStrand != nil {
+                if let anchors = screen.lightAnchors[ornament.id] {
                     let pointer = screen.local(CGRect(origin: NSEvent.mouseLocation, size: .zero)).origin
-                    DecorationArt.freeLights(ornament, screen: bounds.size, brush: pointer,
+                    DecorationArt.freeLights(ornament, anchors: anchors, brush: pointer,
                                              wind: settings.wind, ink: ink, time: motionTime)
                 } else if target != nil && ornament.kind == .lights {
                     DecorationArt.windowLights(ornament, rect: rect, ink: ink, time: motionTime)

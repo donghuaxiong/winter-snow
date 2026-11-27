@@ -1,6 +1,6 @@
 import AppKit
 
-enum SnowballPropKind: String {
+enum SnowballPropKind: String, Codable {
     case carrot, coal, eye, leftTwig, rightTwig, feltHat, woolHat, scarf
 
     var title: String {
@@ -131,8 +131,8 @@ enum SnowballPropChoice: CaseIterable {
     }
 }
 
-struct SnowballProp: Identifiable {
-    let id = UUID()
+struct SnowballProp: Identifiable, Codable, Equatable {
+    var id = UUID()
     let kind: SnowballPropKind
     private(set) var anchor: CGPoint
     // This is the material orientation at the time the piece was pushed into the snow.

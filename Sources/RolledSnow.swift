@@ -23,6 +23,7 @@ struct RolledSnowball: Identifiable {
     let id = UUID()
     var center: CGPoint
     var mass: CGFloat
+    let textureSeed: UInt8
     var velocity = CGVector.zero
     var rotation: CGFloat = 0
     var spin: CGFloat = 0
@@ -33,7 +34,18 @@ struct RolledSnowball: Identifiable {
     var props: [SnowballProp] = []
     var pitchedDown = false
 
+    init(center: CGPoint, mass: CGFloat, textureSeed: UInt8? = nil) {
+        self.center = center
+        self.mass = mass
+        self.textureSeed = textureSeed ?? id.uuid.0
+    }
+
     var radius: CGFloat { min(Self.maximumRadius, 4 + sqrt(max(0, mass) * 9.1)) }
+
+    func stackedCenter(radius: CGFloat, offset: CGFloat) -> CGPoint {
+        let spacing = (self.radius + radius) * 0.92
+        return p(center.x + offset, center.y - sqrt(max(0, spacing * spacing - offset * offset)))
+    }
 
     func grabFrame(at point: CGPoint) -> CGRect? {
         guard mass > 0, hypot(point.x - center.x, point.y - center.y) < radius else { return nil }
@@ -42,6 +54,45 @@ struct RolledSnowball: Identifiable {
         let reach = sqrt(max(0, radius * radius - pow(max(abs(top - center.y), abs(bottom - center.y)), 2)))
         let left = min(point.x, center.x - reach)
         return CGRect(x: left, y: top, width: max(1, max(point.x, center.x + reach) - left), height: bottom - top)
+    }
+}
+
+struct SnowmanPose: Codable, Equatable {
+    struct Part: Codable, Equatable {
+        let mass: CGFloat
+        let rotation: CGFloat
+        let textureSeed: UInt8
+        let props: [SnowballProp]
+        let parent: Int?
+        let offset: CGFloat
+    }
+
+    let parts: [Part]
+
+    func balls(at origin: CGPoint) -> [RolledSnowball] {
+        guard (2...32).contains(parts.count) else { return [] }
+        var result: [RolledSnowball] = []
+        for (index, part) in parts.enumerated() {
+            guard part.mass.isFinite, part.mass > 0, part.rotation.isFinite, part.offset.isFinite else { return [] }
+            var ball = RolledSnowball(center: origin, mass: part.mass, textureSeed: part.textureSeed)
+            ball.rotation = part.rotation
+            ball.props = part.props.map { prop in
+                var copy = prop
+                copy.id = UUID()
+                return copy
+            }
+            ball.freeStack = true
+            if let parent = part.parent {
+                guard result.indices.contains(parent) else { return [] }
+                let support = result[parent]
+                ball.rest = .ball(support.id, offset: part.offset)
+                ball.center = support.stackedCenter(radius: ball.radius, offset: part.offset)
+            } else if index != 0 {
+                return []
+            }
+            result.append(ball)
+        }
+        return result
     }
 }
 
@@ -288,7 +339,7 @@ struct RolledSnow {
             let dx = ball.center.x - candidate.center.x
             let maxOffset = min(candidate.radius * 0.66, (candidate.radius + ball.radius) * 0.51)
             let offset = free ? min(maxOffset, max(-maxOffset, dx)) : 0
-            let center = stackedCenter(on: candidate, radius: ball.radius, offset: offset)
+            let center = candidate.stackedCenter(radius: ball.radius, offset: offset)
             let dy = abs(ball.center.y - center.y)
             guard ball.center.y < candidate.center.y - candidate.radius * 0.30,
                   abs(dx - offset) <= max(9, free ? ball.radius * 0.58 : candidate.radius * 0.84 + ball.radius * 0.20),
@@ -466,11 +517,6 @@ struct RolledSnow {
                              velocity: ball.velocity, reduced: reduced)
     }
 
-    private func stackedCenter(on parent: RolledSnowball, radius: CGFloat, offset: CGFloat) -> CGPoint {
-        let spacing = (parent.radius + radius) * 0.92
-        return p(parent.center.x + offset, parent.center.y - sqrt(max(0, spacing * spacing - offset * offset)))
-    }
-
     private mutating func followSupports() -> Bool {
         guard balls.contains(where: { $0.rest?.parent != nil }) else { return false }
         let indices = Dictionary(uniqueKeysWithValues: balls.indices.map { (balls[$0].id, $0) })
@@ -484,7 +530,7 @@ struct RolledSnow {
             let before = settled.count
             for index in linked where !settled.contains(balls[index].id) {
                 guard case let .ball(id, offset) = balls[index].rest, settled.contains(id), let support = indices[id] else { continue }
-                let center = stackedCenter(on: balls[support], radius: balls[index].radius, offset: offset)
+                let center = balls[support].stackedCenter(radius: balls[index].radius, offset: offset)
                 moved = moved || center != balls[index].center
                 balls[index].center = center
                 settled.insert(balls[index].id)
@@ -509,6 +555,44 @@ struct RolledSnow {
             index += 1
         }
         return result
+    }
+
+    func snowmanPose(containing id: UUID) -> SnowmanPose? {
+        let members = subtree(from: root(of: id))
+        guard members.count > 1 else { return nil }
+        let indices = Dictionary(uniqueKeysWithValues: members.enumerated().map { ($0.element, $0.offset) })
+        let parts = members.compactMap { member -> SnowmanPose.Part? in
+            guard let ball = ball(member) else { return nil }
+            let parent = ball.rest?.parent.flatMap { indices[$0] }
+            let offset: CGFloat = if case let .ball(_, offset) = ball.rest { offset } else { 0 }
+            return .init(mass: ball.mass, rotation: ball.rotation, textureSeed: ball.textureSeed,
+                         props: ball.props, parent: parent, offset: offset)
+        }
+        return parts.count == members.count ? SnowmanPose(parts: parts) : nil
+    }
+
+    mutating func place(_ pose: SnowmanPose, near point: CGPoint, size: CGSize, snow: DisplayScene) -> Bool {
+        var placed = pose.balls(at: .zero)
+        guard let base = placed.first, balls.count + placed.count <= 32 else { return false }
+        let bounds = placed.reduce(CGRect.null) { $0.union(RolledSnowArt.bounds(of: $1)) }
+        guard bounds.width <= size.width, bounds.height <= size.height else { return false }
+        let x = min(size.width - bounds.maxX, max(-bounds.minX, point.x))
+        let ledge = snow.rollingSupport(near: p(x, point.y))
+        guard let surface = ledge?.surface ?? snow.surfaces.first(where: \.floor) else { return false }
+        let foot = ledge?.y ?? snow.supportHeight(surface, at: x)
+        let centerY = foot - base.radius
+        guard centerY + bounds.minY >= 0 else { return false }
+        for index in placed.indices {
+            placed[index].center.x += x
+            placed[index].center.y += centerY
+            if balls.contains(where: { existing in
+                let separation = placed[index].center - existing.center
+                return hypot(separation.dx, separation.dy) < (placed[index].radius + existing.radius) * 0.95
+            }) { return false }
+        }
+        placed[0].rest = .surface(surface.id, fraction: (x - surface.rect.minX) / surface.rect.width)
+        balls += placed
+        return true
     }
 
     func canToggleFree(for id: UUID) -> Bool {
